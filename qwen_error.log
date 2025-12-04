@@ -1,0 +1,156 @@
+Chunk 0 failed: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_0.wav' contains invalid characters under NFKC normalization
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 375, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 181, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_0.wav' contains invalid characters under NFKC normalization
+Chunk 1 failed: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_1.wav' contains invalid characters under NFKC normalization
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 375, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 181, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_1.wav' contains invalid characters under NFKC normalization
+Chunk 2 failed: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_2.wav' contains invalid characters under NFKC normalization
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 375, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 181, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_2.wav' contains invalid characters under NFKC normalization
+Chunk 3 failed: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_3.wav' contains invalid characters under NFKC normalization
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 375, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 181, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_3.wav' contains invalid characters under NFKC normalization
+Chunk 5 failed: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_5.wav' contains invalid characters under NFKC normalization
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 375, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 181, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_5.wav' contains invalid characters under NFKC normalization
+Chunk 4 failed: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_4.wav' contains invalid characters under NFKC normalization
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 375, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 181, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: netloc 'C:\Users\c-xingmao.liang\.qwen3-asr-cache\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？\【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_4.wav' contains invalid characters under NFKC normalization
+Chunk 2 failed: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_2.wav is not exists!
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 376, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 182, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_2.wav is not exists!
+Chunk 0 failed: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_0.wav is not exists!
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 376, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 182, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_0.wav is not exists!
+Chunk 1 failed: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_1.wav is not exists!
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 376, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 182, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_1.wav is not exists!
+Chunk 3 failed: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_3.wav is not exists!
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 376, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 182, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_3.wav is not exists!
+Chunk 4 failed: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_4.wav is not exists!
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 376, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 182, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_4.wav is not exists!
+Chunk 5 failed: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_5.wav is not exists!
+Traceback (most recent call last):
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 376, in transcribe_audio_qwen
+    _, recog_text = future.result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 437, in result
+    return self.__get_result()
+  File "C:\Program Files\Python38\lib\concurrent\futures\_base.py", line 389, in __get_result
+    raise self._exception
+  File "C:\Program Files\Python38\lib\concurrent\futures\thread.py", line 57, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\project\ai\VideoKnowlege\qwen_service.py", line 182, in asr
+    raise Exception(f"Qwen ASR task failed after retries. Last error: {last_exception}")
+Exception: Qwen ASR task failed after retries. Last error: The file: /C:/Users/c-xingmao.liang/.qwen3-asr-cache/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？/【IT老齐029】面试官：MySQL脏读、幻读、不可重复读你能分清吗？.wav_5.wav is not exists!

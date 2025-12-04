@@ -16,6 +16,7 @@ from dashscope import Generation, MultiModalConversation
 from pydub import AudioSegment
 from silero_vad import load_silero_vad, get_speech_timestamps
 from typing import List, Tuple, Any
+from pathlib import Path
 
 # Constants
 WAV_SAMPLE_RATE = 16000
@@ -130,7 +131,10 @@ class QwenASR:
                 audio.export(mp3_path, format="mp3")
                 wav_url = mp3_path
 
-            wav_url = f"file://{wav_url}"
+            # DashScope SDK on Windows seems to have issues with file:/// (3 slashes)
+            # It likely strips file:// and gets /C:/... which fails.
+            # We try to use file://C:/... (2 slashes) which results in C:/... after stripping.
+            wav_url = Path(wav_url).absolute().as_uri().replace("file:///", "file://")
 
         last_exception = None
         for _ in range(MAX_API_RETRY):
