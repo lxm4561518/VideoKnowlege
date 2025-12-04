@@ -1,6 +1,7 @@
 import argparse
 import subprocess
 import sys
+import os
 from pathlib import Path
 
 
@@ -19,6 +20,16 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None):
     # Step 2: Try Direct Download & Transcribe (Fast Method)
     print(f">>> [2/3] 尝试直接下载并转写 (高速模式)...")
     status_file = Path(out) / "status.json"
+    
+    # Init status file for UI
+    try:
+        import json
+        import time
+        with open(status_file, "w", encoding="utf-8") as f:
+            json.dump({"ts": int(time.time()), "phase": "downloading"}, f)
+    except:
+        pass
+
     try:
         cmd = [
             sys.executable,
