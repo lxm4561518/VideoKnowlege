@@ -154,7 +154,8 @@ def main():
         # Find files modified AFTER the task started
         try:
             start_time = st.session_state.start_time
-            files = sorted(Path(out_dir).glob("*.txt"), key=os.path.getmtime, reverse=True)
+            # Search recursively in subdirectories
+            files = sorted(Path(out_dir).glob("**/*.txt"), key=os.path.getmtime, reverse=True)
             
             # Filter by modification time (allow 5s buffer)
             new_files = [f for f in files if f.stat().st_mtime > start_time - 5]

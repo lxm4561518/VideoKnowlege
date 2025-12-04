@@ -25,7 +25,7 @@ def download_audio(url, out_dir, cookies_from_browser=None, cookies_file=None, p
         return url
     ydl_opts = {
         "format": "bestaudio/best",
-        "outtmpl": str(out_dir / "%(title)s.%(ext)s"),
+        "outtmpl": str(out_dir / "%(title)s" / "%(title)s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
     }
@@ -68,26 +68,45 @@ def download_audio(url, out_dir, cookies_from_browser=None, cookies_file=None, p
         ]
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-    title = sanitize_filename(info.get("title", "audio"))
+    
+    # Determine where the file ended up
+    # prepare_filename gives the path based on info and outtmpl
+    downloaded_path_str = ydl.prepare_filename(info)
+    downloaded_path = Path(downloaded_path_str)
+    
+    # The directory where the file should be
+    search_dir = downloaded_path.parent
+    title_stem = downloaded_path.stem
+    
+    audio_path = None
+
     if ensure_ffmpeg():
-        audio_path = next(out_dir.glob(f"{title}.wav"), None)
-        if audio_path is None:
-            # Fallback: find any wav
-            for p in out_dir.glob("*.wav"):
-                audio_path = p
-                break
+        # Look for wav in the specific directory
+        # Note: stem might vary if sanitization differs, but search_dir is correct
+        if search_dir.exists():
+            audio_path = next(search_dir.glob(f"{title_stem}.wav"), None)
+            if audio_path is None:
+                # Fallback: find any wav in that subdirectory
+                audio_path = next(search_dir.glob("*.wav"), None)
     else:
-        # No ffmpeg; pick bestaudio file
-        audio_path = None
-        for ext in ("m4a", "webm", "mp3", "aac", "ogg"):
-            candidate = next(out_dir.glob(f"{title}.{ext}"), None)
-            if candidate is not None:
-                audio_path = candidate
-                break
-        if audio_path is None:
-            for p in sorted(out_dir.glob("*.*")):
-                audio_path = p
-                break
+        # No ffmpeg
+        if downloaded_path.exists():
+            audio_path = downloaded_path
+        elif search_dir.exists():
+            # Try to find any audio file in that subdir
+            for ext in ("m4a", "webm", "mp3", "aac", "ogg"):
+                candidate = next(search_dir.glob(f"*.{ext}"), None)
+                if candidate is not None:
+                    audio_path = candidate
+                    break
+    
+    # Last resort fallback: search recursively in out_dir
+    if audio_path is None or not audio_path.exists():
+        if ensure_ffmpeg():
+            audio_path = next(out_dir.glob("**/*.wav"), None)
+        else:
+            audio_path = next(out_dir.glob("**/*.*"), None)
+
     if audio_path is None:
         raise RuntimeError("音频下载失败")
     return str(audio_path)
