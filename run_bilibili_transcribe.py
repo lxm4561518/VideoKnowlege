@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 
-def run(url: str, out: str, model: str, lang: str, proxy: str = None):
+def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: str = None, qwen_key: str = None, llm_engine: str = None, asr_engine: str = "whisper"):
     cookies_file = Path("cookies") / "bilibili.txt"
     cookies_file.parent.mkdir(exist_ok=True)
     
@@ -30,6 +30,15 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None):
     except:
         pass
 
+    # Determine engine
+    # If asr_engine is explicitly provided (e.g. from UI), use it.
+    # Fallback logic: if groq_key is present and asr_engine is default (whisper), user might want groq?
+    # But now we have explicit control. Let's trust the passed asr_engine unless it's default and we want to infer.
+    # For backward compatibility: if groq_key is set and asr_engine is whisper, we previously switched to groq.
+    # But if we want to allow Whisper+GroqLLM, we shouldn't auto-switch ASR.
+    # So we will rely on the caller (web_ui) to set asr_engine="groq" if they want Groq ASR.
+    engine = asr_engine
+
     try:
         cmd = [
             sys.executable,
@@ -38,7 +47,7 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None):
             "--out",
             out,
             "--engine",
-            "whisper",
+            engine,
             "--model",
             model,
             "--lang",
@@ -50,13 +59,19 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None):
         ]
         if proxy:
             cmd += ["--proxy", proxy]
+        if groq_key:
+            cmd += ["--groq-key", groq_key]
+        if qwen_key:
+            cmd += ["--qwen-key", qwen_key]
+        if llm_engine:
+            cmd += ["--llm-engine", llm_engine]
         
         # Set OMP_NUM_THREADS=1 to avoid mkl_malloc memory error on some systems
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = "1"
         
         subprocess.run(cmd, check=True, env=env)
-        print(">>> 成功: 视频已通过高速模式完成转写！")
+        print(f">>> 成功: 视频已通过高速模式完成转写 (Engine: {engine})！")
         return
     except subprocess.CalledProcessError:
         print(">>> 警告: 直接下载失败 (可能是B站反爬或Cookie无效)")
@@ -78,6 +93,8 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None):
             lang,
             "--auto"
         ]
+        # TODO: Add Groq support to recording mode if needed, but for now let's keep it simple
+        # Recording mode typically uses local Whisper for real-time or post-process
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
         print(f"Error: 录制模式也失败了 ({e})")
@@ -91,8 +108,12 @@ def main():
     parser.add_argument("--model", default="small", help="whisper模型：tiny/base/small/medium/large-v3")
     parser.add_argument("--lang", default="zh", help="语言代码，如zh/en")
     parser.add_argument("--proxy", default=None, help="HTTP/HTTPS代理，如 http://127.0.0.1:7890")
+    parser.add_argument("--groq-key", default=None, help="Groq API Key")
+    parser.add_argument("--qwen-key", default=None, help="Qwen API Key")
+    parser.add_argument("--llm-engine", choices=["groq", "qwen"], default=None, help="LLM Engine")
+    parser.add_argument("--asr-engine", choices=["whisper", "groq", "vosk"], default="whisper", help="ASR Engine")
     args = parser.parse_args()
-    run(args.url, args.out, args.model, args.lang, args.proxy)
+    run(args.url, args.out, args.model, args.lang, args.proxy, args.groq_key, args.qwen_key, args.llm_engine, args.asr_engine)
 
 
 if __name__ == "__main__":

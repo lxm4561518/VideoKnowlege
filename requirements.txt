@@ -7,3 +7,5 @@ requests
 brotli
 streamlit
 watchdog
+groq
+dashscope

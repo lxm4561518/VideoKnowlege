@@ -18,15 +18,27 @@ def get_status(status_file):
         pass
     return None
 
-def run_process(url, model, lang, out_dir):
+def run_process(url, model, lang, out_dir, groq_key=None, qwen_key=None, proxy=None, llm_engine=None, asr_engine="whisper"):
     cmd = [
         sys.executable,
         "run_bilibili_transcribe.py",
         url,
         "--out", out_dir,
         "--model", model,
-        "--lang", lang
+        "--lang", lang,
+        "--asr-engine", asr_engine
     ]
+    if llm_engine:
+        cmd += ["--llm-engine", llm_engine]
+    
+    if groq_key:
+        cmd += ["--groq-key", groq_key]
+        
+    if qwen_key:
+        cmd += ["--qwen-key", qwen_key]
+    
+    if proxy:
+        cmd += ["--proxy", proxy]
     
     # Set environment variable for OMP
     env = os.environ.copy()
@@ -47,7 +59,56 @@ def main():
     
     with st.sidebar:
         st.header("设置")
-        model = st.selectbox("Whisper模型", ["tiny", "base", "small", "medium", "large-v3"], index=2)
+        
+        # Proxy Settings
+        use_proxy = st.checkbox("🌐 启用网络代理", value=False, help="如果无法访问 B站或 Groq API，请开启此选项")
+        proxy_url = ""
+        if use_proxy:
+            proxy_url = st.text_input("代理地址 (HTTP/HTTPS)", value="http://127.0.0.1:7890", placeholder="http://127.0.0.1:7890")
+        
+        # Groq Acceleration
+        st.subheader("🛠️ 引擎配置")
+        
+        # ASR Configuration
+        asr_option = st.selectbox("语音转写引擎 (ASR)", ["Whisper (本地)", "Groq (云端/极速)", "Qwen (DashScope/云端)", "Vosk (离线)"], index=0)
+        asr_engine = "whisper"
+        if "Groq" in asr_option:
+            asr_engine = "groq"
+        elif "Qwen" in asr_option:
+            asr_engine = "qwen"
+        elif "Vosk" in asr_option:
+            asr_engine = "vosk"
+        
+        # LLM Configuration
+        llm_option = st.selectbox("AI 优化与总结 (LLM)", ["不使用", "Groq (Llama3)", "Qwen (通义千问)"], index=0)
+        llm_engine = None
+        if "Groq" in llm_option:
+            llm_engine = "groq"
+        elif "Qwen" in llm_option:
+            llm_engine = "qwen"
+
+        # API Keys
+        groq_key = ""
+        qwen_key = ""
+        
+        if asr_engine == "groq" or llm_engine == "groq":
+            groq_key = st.text_input("Groq API Key", type="password", placeholder="gsk_...", help="用于 Groq 转写或 Llama3 总结")
+            st.caption("申请: https://console.groq.com/keys")
+        
+        if asr_engine == "qwen" or llm_engine == "qwen":
+            qwen_key = st.text_input("Qwen API Key", type="password", placeholder="sk-...", help="用于通义千问转写或总结")
+            st.caption("申请: https://dashscope.console.aliyun.com/")
+        
+        model = "small"
+        if asr_engine == "whisper":
+            model = st.selectbox("Whisper模型", ["tiny", "base", "small", "medium", "large-v3"], index=2)
+        elif asr_engine == "groq":
+            st.info("Groq 模式下默认使用 whisper-large-v3 模型")
+            model = "large-v3"
+        elif asr_engine == "qwen":
+            st.info("Qwen 模式下使用 qwen3-asr-flash 模型 (云端)")
+            model = "qwen3-asr-flash"
+            
         lang = st.selectbox("语言", ["zh", "en", "ja"], index=0)
         st.info("说明：优先尝试高速下载，失败后自动切换录制模式。")
 
@@ -69,6 +130,10 @@ def main():
     if start_btn and url:
         if not url.strip():
             st.error("请输入有效的链接")
+        elif (asr_engine == "groq" or llm_engine == "groq") and not groq_key:
+            st.error("请在左侧侧边栏输入 Groq API Key")
+        elif (asr_engine == "qwen" or llm_engine == "qwen") and not qwen_key:
+            st.error("请在左侧侧边栏输入 Qwen API Key")
         else:
             st.session_state.running = True
             st.session_state.start_time = time.time()
@@ -84,7 +149,8 @@ def main():
             # Run in a separate thread is hard with streamlit rerun model, 
             # so we use Popen and monitor in a loop here.
             with st.spinner("正在启动任务..."):
-                process = run_process(url, model, lang, out_dir)
+                final_proxy = proxy_url if use_proxy and proxy_url else None
+                process = run_process(url, model, lang, out_dir, groq_key, qwen_key, final_proxy, llm_engine, asr_engine)
                 st.session_state.process = process
                 st.rerun()
 
@@ -123,8 +189,16 @@ def main():
                 
                 elif phase == "transcribing":
                     segments = status.get("segments", 0)
-                    progress_bar.progress(85)
+                    progress_bar.progress(50)
                     status_text.success(f"📝 正在转写中... 已生成 {segments} 句字幕")
+                
+                elif phase == "transcribed":
+                    progress_bar.progress(80)
+                    status_text.success("📝 转写完成，正在准备后处理...")
+                    
+                elif phase == "optimizing":
+                    progress_bar.progress(90)
+                    status_text.info("🧠 正在进行 AI 智能优化与总结...")
                 
                 elif phase == "done":
                     progress_bar.progress(100)
@@ -161,40 +235,81 @@ def main():
             new_files = [f for f in files if f.stat().st_mtime > start_time - 5]
             
             if new_files:
-                latest_file = new_files[0]
-                st.subheader(latest_file.stem)
+                # Logic to group files by basename
+                base_files = {}
+                for f in new_files:
+                    # Remove _optimized suffix to find the base name
+                    if f.name.endswith("_optimized.txt"):
+                        base_name = f.name.replace("_optimized.txt", "")
+                    else:
+                        base_name = f.stem
+                    
+                    if base_name not in base_files:
+                        base_files[base_name] = []
+                    base_files[base_name].append(f)
                 
-                tab1, tab2 = st.tabs(["📄 纯文本", "🎬 字幕文件 (SRT)"])
+                # Pick the first group (most recent)
+                latest_base = list(base_files.keys())[0]
+                latest_group = base_files[latest_base]
                 
-                with tab1:
-                    with open(latest_file, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    st.text_area("文案内容", content, height=400)
-                    st.download_button("下载文案 (.txt)", content, file_name=latest_file.name)
+                st.subheader(latest_base)
                 
-                with tab2:
-                    srt_file = latest_file.with_suffix(".srt")
+                # Define paths
+                txt_file = Path(out_dir) / latest_group[0].parent / f"{latest_base}.txt"
+                optimized_file = Path(out_dir) / latest_group[0].parent / f"{latest_base}_optimized.txt"
+                summary_file = Path(out_dir) / latest_group[0].parent / f"{latest_base}_summary.md"
+                srt_file = Path(out_dir) / latest_group[0].parent / f"{latest_base}.srt"
+
+                tabs = ["📄 原始文案", "🎬 字幕文件 (SRT)"]
+                if optimized_file.exists():
+                    tabs.insert(0, "✨ AI 优化文案")
+                if summary_file.exists():
+                    tabs.insert(0, "💡 智能总结")
+                
+                st_tabs = st.tabs(tabs)
+                
+                tab_idx = 0
+                
+                # Summary Tab
+                if summary_file.exists():
+                    with st_tabs[tab_idx]:
+                        with open(summary_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        st.markdown(content)
+                        st.download_button("下载总结 (.md)", content, file_name=summary_file.name)
+                    tab_idx += 1
+
+                # Optimized Tab
+                if optimized_file.exists():
+                    with st_tabs[tab_idx]:
+                        with open(optimized_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        st.text_area("优化后内容", content, height=400)
+                        st.download_button("下载优化文案 (.txt)", content, file_name=optimized_file.name)
+                    tab_idx += 1
+                
+                # Original Tab
+                with st_tabs[tab_idx]:
+                    if txt_file.exists():
+                        with open(txt_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        st.text_area("文案内容", content, height=400)
+                        st.download_button("下载文案 (.txt)", content, file_name=txt_file.name)
+                    else:
+                        st.warning("原始文案文件未找到")
+                tab_idx += 1
+                
+                # SRT Tab
+                with st_tabs[tab_idx]:
                     if srt_file.exists():
                         with open(srt_file, "r", encoding="utf-8") as f:
                             srt_content = f.read()
                         st.text_area("字幕内容", srt_content, height=400)
                         st.download_button("下载字幕 (.srt)", srt_content, file_name=srt_file.name)
-            else:
-                st.warning("未找到本次任务生成的输出文件。可能是因为：")
-                st.write("1. 视频转写失败")
-                st.write("2. 文件已存在且未被覆盖（跳过了转写）")
-                st.write("3. 任务被意外终止")
-                
-                # Option to show older files
-                if files:
-                    st.info(f"找到 {len(files)} 个历史文件，最近的一个是: {files[0].name}")
-                    if st.button("显示最近的历史文件"):
-                         # This logic requires rerun to persist the choice, simplistic approach here
-                         st.session_state.start_time = 0 # Reset time filter to show old files
-                         st.rerun()
-
+                    else:
+                        st.warning("字幕文件未找到")
         except Exception as e:
-            st.error(f"读取结果失败: {e}")
+            st.error(f"加载结果时出错: {e}")
 
 if __name__ == "__main__":
     main()
