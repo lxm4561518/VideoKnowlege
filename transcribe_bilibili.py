@@ -305,6 +305,8 @@ def main():
     
     if not llm_engine and args.groq_key:
         llm_engine = "groq"
+    elif not llm_engine and args.qwen_key:
+        llm_engine = "qwen"
 
     if llm_engine:
         print(f"正在使用 {llm_engine} 进行 AI 优化和总结...")

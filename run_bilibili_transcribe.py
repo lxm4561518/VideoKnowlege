@@ -3,7 +3,10 @@ import subprocess
 import sys
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
 
 def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: str = None, qwen_key: str = None, llm_engine: str = None, asr_engine: str = "whisper"):
     cookies_file = Path("cookies") / "bilibili.txt"
@@ -21,22 +24,16 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
     print(f">>> [2/3] 尝试直接下载并转写 (高速模式)...")
     status_file = Path(out) / "status.json"
     
-    # Init status file for UI
+    # Init status file (optional, for logging)
     try:
         import json
         import time
+        os.makedirs(out, exist_ok=True)
         with open(status_file, "w", encoding="utf-8") as f:
             json.dump({"ts": int(time.time()), "phase": "downloading"}, f)
     except:
         pass
 
-    # Determine engine
-    # If asr_engine is explicitly provided (e.g. from UI), use it.
-    # Fallback logic: if groq_key is present and asr_engine is default (whisper), user might want groq?
-    # But now we have explicit control. Let's trust the passed asr_engine unless it's default and we want to infer.
-    # For backward compatibility: if groq_key is set and asr_engine is whisper, we previously switched to groq.
-    # But if we want to allow Whisper+GroqLLM, we shouldn't auto-switch ASR.
-    # So we will rely on the caller (web_ui) to set asr_engine="groq" if they want Groq ASR.
     engine = asr_engine
 
     try:
@@ -70,6 +67,7 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = "1"
         
+        print(f"Executing command: {' '.join(cmd)}")
         subprocess.run(cmd, check=True, env=env)
         print(f">>> 成功: 视频已通过高速模式完成转写 (Engine: {engine})！")
         return
@@ -93,8 +91,7 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
             lang,
             "--auto"
         ]
-        # TODO: Add Groq support to recording mode if needed, but for now let's keep it simple
-        # Recording mode typically uses local Whisper for real-time or post-process
+        # TODO: Add Groq/Qwen support to recording mode if needed
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
         print(f"Error: 录制模式也失败了 ({e})")
@@ -102,18 +99,38 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="一键导出Cookie并转写B站视频")
-    parser.add_argument("url", help="B站视频页面URL")
-    parser.add_argument("--out", default="outputs", help="输出目录")
-    parser.add_argument("--model", default="small", help="whisper模型：tiny/base/small/medium/large-v3")
-    parser.add_argument("--lang", default="zh", help="语言代码，如zh/en")
-    parser.add_argument("--proxy", default=None, help="HTTP/HTTPS代理，如 http://127.0.0.1:7890")
-    parser.add_argument("--groq-key", default=None, help="Groq API Key")
-    parser.add_argument("--qwen-key", default=None, help="Qwen API Key")
-    parser.add_argument("--llm-engine", choices=["groq", "qwen"], default=None, help="LLM Engine")
-    parser.add_argument("--asr-engine", choices=["whisper", "groq", "vosk"], default="whisper", help="ASR Engine")
+    parser = argparse.ArgumentParser(description="一键导出Cookie并转写B站视频 (Backend Mode)")
+    
+    # Argument defaults are pulled from environment variables
+    parser.add_argument("url", nargs='?', help="B站视频页面URL (Optional if BILIBILI_URL is set in .env)")
+    parser.add_argument("--out", default=os.getenv("OUTPUT_DIR", "outputs"), help="输出目录")
+    parser.add_argument("--model", default=os.getenv("MODEL", "small"), help="whisper模型：tiny/base/small/medium/large-v3")
+    parser.add_argument("--lang", default=os.getenv("LANG", "zh"), help="语言代码，如zh/en")
+    parser.add_argument("--proxy", default=os.getenv("PROXY"), help="HTTP/HTTPS代理，如 http://127.0.0.1:7890")
+    parser.add_argument("--groq-key", default=os.getenv("GROQ_API_KEY"), help="Groq API Key")
+    parser.add_argument("--qwen-key", default=os.getenv("QWEN_API_KEY"), help="Qwen API Key")
+    parser.add_argument("--llm-engine", choices=["groq", "qwen"], default=os.getenv("LLM_ENGINE"), help="LLM Engine")
+    parser.add_argument("--asr-engine", choices=["whisper", "groq", "vosk", "qwen"], default=os.getenv("ASR_ENGINE", "whisper"), help="ASR Engine")
+    
     args = parser.parse_args()
-    run(args.url, args.out, args.model, args.lang, args.proxy, args.groq_key, args.qwen_key, args.llm_engine, args.asr_engine)
+
+    target_url = args.url or os.getenv("BILIBILI_URL")
+    if not target_url:
+        print("Error: No URL provided. Please provide a URL as an argument or set BILIBILI_URL in .env file.")
+        parser.print_help()
+        sys.exit(1)
+
+    print(f"Configuration Loaded:")
+    print(f"  URL: {target_url}")
+    print(f"  ASR Engine: {args.asr_engine}")
+    print(f"  LLM Engine: {args.llm_engine}")
+    print(f"  Output Dir: {args.out}")
+    if args.qwen_key:
+        print(f"  Qwen Key: ******{args.qwen_key[-4:]}")
+    if args.groq_key:
+        print(f"  Groq Key: ******{args.groq_key[-4:]}")
+
+    run(target_url, args.out, args.model, args.lang, args.proxy, args.groq_key, args.qwen_key, args.llm_engine, args.asr_engine)
 
 
 if __name__ == "__main__":

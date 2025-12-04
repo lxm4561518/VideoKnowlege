@@ -189,8 +189,23 @@ def load_audio(file_path: str) -> np.ndarray:
         # Try librosa first
         wav_data, _ = librosa.load(file_path, sr=WAV_SAMPLE_RATE, mono=True)
         return wav_data
+    except FileNotFoundError as e:
+         if "WinError 2" in str(e) or e.errno == 2:
+             raise RuntimeError("FFmpeg not found. Please install FFmpeg and add it to PATH, or place ffmpeg.exe in the project directory.") from e
+         raise
     except Exception as e:
         print(f"Librosa load failed, trying ffmpeg directly: {e}")
+        try:
+            # Fallback: try using ffmpeg directly to decode to stdout
+            # command = ['ffmpeg', '-i', file_path, '-f', 'wav', '-ar', str(WAV_SAMPLE_RATE), '-ac', '1', '-']
+            # process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            # return np.frombuffer(process.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+            # The above is complex to handle headers. simpler to raise error if librosa fails and it's likely ffmpeg missing.
+            if "No backend available" in str(e) or "WinError 2" in str(e):
+                 raise RuntimeError("FFmpeg not found. Please install FFmpeg to process non-WAV audio files.") from e
+            raise
+        except Exception as ffmpeg_error:
+            raise RuntimeError(f"Failed to load audio. Ensure FFmpeg is installed. Details: {e}") from ffmpeg_error
         try:
             command = [
                 'ffmpeg',
