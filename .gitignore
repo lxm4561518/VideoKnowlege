@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+.trae/
+
+# Project specific
+cookies/
+outputs/
+inputs/
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.json
+*.srt
+*.txt
+!requirements.txt
+!README.md
