@@ -2,31 +2,42 @@ import argparse
 import subprocess
 import sys
 import os
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
-def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: str = None, qwen_key: str = None, llm_engine: str = None, asr_engine: str = "whisper"):
-    cookies_file = Path("cookies") / "bilibili.txt"
+def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: str = None, qwen_key: str = None, llm_engine: str = None, asr_engine: str = "whisper", json_mode: bool = False):
+    
+    def log(msg):
+        if json_mode:
+            print(msg, file=sys.stderr)
+        else:
+            print(msg)
+
+    BASE_DIR = Path(__file__).parent.absolute()
+    cookies_file = BASE_DIR / "cookies" / "bilibili.txt"
     cookies_file.parent.mkdir(exist_ok=True)
     
     # Step 1: Export Cookies
-    print(f">>> [1/3] 正在导出 Bilibili Cookies 到 {cookies_file} ...")
-    export_script = "export_bilibili_cookies.py" if Path("export_bilibili_cookies.py").exists() else "export_chrome_cookies_direct.py"
+    log(f">>> [1/3] 正在导出 Bilibili Cookies 到 {cookies_file} ...")
+    export_script_name = "export_bilibili_cookies.py" if (BASE_DIR / "export_bilibili_cookies.py").exists() else "export_chrome_cookies_direct.py"
+    export_script = str(BASE_DIR / export_script_name)
     try:
-        subprocess.run([sys.executable, export_script, "--out", str(cookies_file)], check=True)
+        # If json_mode, redirect stdout to stderr to keep stdout clean for JSON output
+        stdout_dest = sys.stderr if json_mode else None
+        subprocess.run([sys.executable, export_script, "--out", str(cookies_file)], check=True, stdout=stdout_dest, stderr=sys.stderr)
     except Exception as e:
-        print(f"Warning: Cookie导出失败 ({e})，将尝试无Cookie模式或使用旧Cookie")
+        log(f"Warning: Cookie导出失败 ({e})，将尝试无Cookie模式或使用旧Cookie")
 
     # Step 2: Try Direct Download & Transcribe (Fast Method)
-    print(f">>> [2/3] 尝试直接下载并转写 (高速模式)...")
+    log(f">>> [2/3] 尝试直接下载并转写 (高速模式)...")
     status_file = Path(out) / "status.json"
     
     # Init status file (optional, for logging)
     try:
-        import json
         import time
         os.makedirs(out, exist_ok=True)
         with open(status_file, "w", encoding="utf-8") as f:
@@ -35,11 +46,12 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
         pass
 
     engine = asr_engine
+    captured_summary_path = None
 
     try:
         cmd = [
             sys.executable,
-            "transcribe_bilibili.py",
+            str(BASE_DIR / "transcribe_bilibili.py"),
             url,
             "--out",
             out,
@@ -66,17 +78,73 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
         # Set OMP_NUM_THREADS=1 to avoid mkl_malloc memory error on some systems
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         
-        print(f"Executing command: {' '.join(cmd)}")
-        subprocess.run(cmd, check=True, env=env)
-        print(f">>> 成功: 视频已通过高速模式完成转写 (Engine: {engine})！")
+        log(f"Executing command: {' '.join(cmd)}")
+        
+        # In JSON mode, we need to capture output to find result paths, 
+        # and ensure no stray prints go to stdout.
+        if json_mode:
+            process = subprocess.Popen(
+                cmd, 
+                env=env, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT,
+                encoding='utf-8',
+                errors='replace'
+            )
+            
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    sys.stderr.write(line) # Echo to stderr
+                    line_clean = line.strip()
+                    if "AI 智能总结已生成:" in line_clean:
+                        captured_summary_path = line_clean.split("AI 智能总结已生成:")[-1].strip()
+            
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, cmd)
+        else:
+            subprocess.run(cmd, check=True, env=env)
+            
+        log(f">>> 成功: 视频已通过高速模式完成转写 (Engine: {engine})！")
+        
+        if json_mode:
+            result = {}
+            if captured_summary_path and os.path.exists(captured_summary_path):
+                # Extract title from filename: Title_summary.md
+                filename = os.path.basename(captured_summary_path)
+                # Assuming format: Title_summary.md
+                title = filename.replace("_summary.md", "")
+                result["title"] = title
+                
+                with open(captured_summary_path, "r", encoding="utf-8") as f:
+                    result["summary"] = f.read()
+                
+                optimized_path = captured_summary_path.replace("_summary.md", "_optimized.txt")
+                if os.path.exists(optimized_path):
+                    with open(optimized_path, "r", encoding="utf-8") as f:
+                        result["content"] = f.read()
+            else:
+                 # Try to guess path if not captured (e.g. skipped because existed)
+                 # But for now, just report error or what we have
+                 result["error"] = "Summary file not found or captured."
+
+            print(json.dumps(result, ensure_ascii=False))
+            
         return
+
     except subprocess.CalledProcessError:
-        print(">>> 警告: 直接下载失败 (可能是B站反爬或Cookie无效)")
-        print(">>> [3/3] 切换到录制模式 (Fallback)...")
+        log(">>> 警告: 直接下载失败 (可能是B站反爬或Cookie无效)")
+        log(">>> [3/3] 切换到录制模式 (Fallback)...")
+        if json_mode:
+             print(json.dumps({"error": "Download failed. Recording fallback not supported in JSON mode."}, ensure_ascii=False))
+             sys.exit(1)
 
     # Step 3: Fallback to Recording
-    print(">>> 开始录制模式 (请保持静音，脚本将自动播放视频)...")
+    log(">>> 开始录制模式 (请保持静音，脚本将自动播放视频)...")
     # Ensure previous status is cleared or marked
     try:
         cmd = [
@@ -111,26 +179,33 @@ def main():
     parser.add_argument("--qwen-key", default=os.getenv("QWEN_API_KEY"), help="Qwen API Key")
     parser.add_argument("--llm-engine", choices=["groq", "qwen"], default=os.getenv("LLM_ENGINE"), help="LLM Engine")
     parser.add_argument("--asr-engine", choices=["whisper", "groq", "vosk", "qwen"], default=os.getenv("ASR_ENGINE", "whisper"), help="ASR Engine")
+    parser.add_argument("--json", action="store_true", help="启用JSON输出模式 (用于N8N集成)，只输出最终结果JSON到stdout，日志输出到stderr")
     
     args = parser.parse_args()
 
     target_url = args.url or os.getenv("BILIBILI_URL")
     if not target_url:
-        print("Error: No URL provided. Please provide a URL as an argument or set BILIBILI_URL in .env file.")
-        parser.print_help()
+        print("Error: No URL provided. Please provide a URL as an argument or set BILIBILI_URL in .env file.", file=sys.stderr)
+        parser.print_help(sys.stderr)
         sys.exit(1)
 
-    print(f"Configuration Loaded:")
-    print(f"  URL: {target_url}")
-    print(f"  ASR Engine: {args.asr_engine}")
-    print(f"  LLM Engine: {args.llm_engine}")
-    print(f"  Output Dir: {args.out}")
-    if args.qwen_key:
-        print(f"  Qwen Key: ******{args.qwen_key[-4:]}")
-    if args.groq_key:
-        print(f"  Groq Key: ******{args.groq_key[-4:]}")
+    # Determine output format
+    env_format = os.getenv("OUTPUT_FORMAT", "json").lower()
+    json_mode = args.json or (env_format == "json")
 
-    run(target_url, args.out, args.model, args.lang, args.proxy, args.groq_key, args.qwen_key, args.llm_engine, args.asr_engine)
+    if not json_mode:
+        print(f"Configuration Loaded:")
+        print(f"  URL: {target_url}")
+        print(f"  ASR Engine: {args.asr_engine}")
+        print(f"  LLM Engine: {args.llm_engine}")
+        print(f"  Output Dir: {args.out}")
+        print(f"  Output Format: {env_format}")
+        if args.qwen_key:
+            print(f"  Qwen Key: ******{args.qwen_key[-4:]}")
+        if args.groq_key:
+            print(f"  Groq Key: ******{args.groq_key[-4:]}")
+
+    run(target_url, args.out, args.model, args.lang, args.proxy, args.groq_key, args.qwen_key, args.llm_engine, args.asr_engine, json_mode=json_mode)
 
 
 if __name__ == "__main__":
