@@ -279,6 +279,7 @@ def main():
     parser.add_argument("--groq-key", default=None, help="Groq API Key")
     parser.add_argument("--qwen-key", default=None, help="Qwen (DashScope) API Key")
     parser.add_argument("--llm-engine", choices=["groq", "qwen"], default=None, help="LLM引擎：groq/qwen，用于优化和总结")
+    parser.add_argument("--no-summary", action="store_true", help="Skip summary generation")
     args = parser.parse_args()
 
     audio_path = download_audio(
@@ -361,7 +362,9 @@ def main():
                 print(f"AI 优化文案已生成: {optimized_path}")
             
             # 2. Summarize
-            if os.path.exists(summary_path) and os.path.getsize(summary_path) > 0:
+            if args.no_summary:
+                print("跳过 AI 智能总结 (requested by --no-summary)")
+            elif os.path.exists(summary_path) and os.path.getsize(summary_path) > 0:
                 print(f"AI 智能总结已生成: {summary_path}")
             else:
                 if llm_engine == "groq":

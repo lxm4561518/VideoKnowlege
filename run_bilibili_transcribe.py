@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: str = None, qwen_key: str = None, llm_engine: str = None, asr_engine: str = "whisper", json_mode: bool = False):
+def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: str = None, qwen_key: str = None, llm_engine: str = None, asr_engine: str = "whisper", json_mode: bool = False, no_summary: bool = False, max_retries: int = 3, retry_intervals: list = [120, 300, 480]):
     
     def log(msg):
         if json_mode:
@@ -47,6 +47,7 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
 
     engine = asr_engine
     captured_summary_path = None
+    captured_optimized_path = None
 
     try:
         cmd = [
@@ -74,45 +75,82 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
             cmd += ["--qwen-key", qwen_key]
         if llm_engine:
             cmd += ["--llm-engine", llm_engine]
+        if no_summary:
+            cmd += ["--no-summary"]
         
         # Set OMP_NUM_THREADS=1 to avoid mkl_malloc memory error on some systems
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         
-        log(f"Executing command: {' '.join(cmd)}")
-        
-        # In JSON mode, we need to capture output to find result paths, 
-        # and ensure no stray prints go to stdout.
-        if json_mode:
-            process = subprocess.Popen(
-                cmd, 
-                env=env, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT,
-                encoding='utf-8',
-                errors='replace'
-            )
+        # Retry Loop
+        import time
+        attempt = 0
+        while True:
+            log(f"Executing command (Attempt {attempt + 1}/{max_retries + 1}): {' '.join(cmd)}")
             
-            while True:
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
-                    break
-                if line:
-                    sys.stderr.write(line) # Echo to stderr
-                    line_clean = line.strip()
-                    if "AI 智能总结已生成:" in line_clean:
-                        captured_summary_path = line_clean.split("AI 智能总结已生成:")[-1].strip()
-            
-            if process.returncode != 0:
-                raise subprocess.CalledProcessError(process.returncode, cmd)
-        else:
-            subprocess.run(cmd, check=True, env=env)
+            # In JSON mode, we need to capture output to find result paths, 
+            # and ensure no stray prints go to stdout.
+            if json_mode:
+                process = subprocess.Popen(
+                    cmd, 
+                    env=env, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.STDOUT,
+                    encoding='utf-8',
+                    errors='replace'
+                )
+                
+                captured_summary_path = None
+                captured_optimized_path = None
+                
+                while True:
+                    line = process.stdout.readline()
+                    if not line and process.poll() is not None:
+                        break
+                    if line:
+                        sys.stderr.write(line) # Echo to stderr
+                        line_clean = line.strip()
+                        if "AI 智能总结已生成:" in line_clean:
+                            captured_summary_path = line_clean.split("AI 智能总结已生成:")[-1].strip()
+                        elif "AI 优化文案已生成:" in line_clean:
+                            captured_optimized_path = line_clean.split("AI 优化文案已生成:")[-1].strip()
+                
+                if process.returncode != 0:
+                    attempt += 1
+                    if attempt > max_retries:
+                         raise subprocess.CalledProcessError(process.returncode, cmd)
+                    
+                    # Calculate wait time
+                    idx = attempt - 1
+                    wait_seconds = retry_intervals[idx] if idx < len(retry_intervals) else retry_intervals[-1]
+                    log(f">>> 警告: 转写失败 (Attempt {attempt}/{max_retries})，将在 {wait_seconds} 秒后重试...")
+                    time.sleep(wait_seconds)
+                    continue # Retry loop
+                else:
+                    break # Success, exit loop
+
+            else:
+                try:
+                    subprocess.run(cmd, check=True, env=env)
+                    break # Success
+                except subprocess.CalledProcessError as e:
+                    attempt += 1
+                    if attempt > max_retries:
+                        raise e
+                    
+                    # Calculate wait time
+                    idx = attempt - 1
+                    wait_seconds = retry_intervals[idx] if idx < len(retry_intervals) else retry_intervals[-1]
+                    log(f">>> 警告: 转写失败 (Attempt {attempt}/{max_retries})，将在 {wait_seconds} 秒后重试...")
+                    time.sleep(wait_seconds)
+                    continue # Retry loop
             
         log(f">>> 成功: 视频已通过高速模式完成转写 (Engine: {engine})！")
         
         if json_mode:
             result = {}
+            # If summary is captured, use it to derive other paths
             if captured_summary_path and os.path.exists(captured_summary_path):
                 # Extract title from filename: Title_summary.md
                 filename = os.path.basename(captured_summary_path)
@@ -127,6 +165,22 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
                 if os.path.exists(optimized_path):
                     with open(optimized_path, "r", encoding="utf-8") as f:
                         result["content"] = f.read()
+            # If no summary captured (e.g. no_summary=True), try to find optimized text
+            elif no_summary:
+                 result["summary"] = None
+                 
+                 if captured_optimized_path and os.path.exists(captured_optimized_path):
+                     # Derive title from filename: Title_optimized.txt
+                     filename = os.path.basename(captured_optimized_path)
+                     title = filename.replace("_optimized.txt", "")
+                     result["title"] = title
+                     
+                     with open(captured_optimized_path, "r", encoding="utf-8") as f:
+                        result["content"] = f.read()
+                 else:
+                     result["content"] = None
+                     result["title"] = None
+                     result["error"] = "Optimization skipped or file not found, but summary was also disabled."
             else:
                  # Try to guess path if not captured (e.g. skipped because existed)
                  # But for now, just report error or what we have
@@ -180,6 +234,9 @@ def main():
     parser.add_argument("--llm-engine", choices=["groq", "qwen"], default=os.getenv("LLM_ENGINE"), help="LLM Engine")
     parser.add_argument("--asr-engine", choices=["whisper", "groq", "vosk", "qwen"], default=os.getenv("ASR_ENGINE", "whisper"), help="ASR Engine")
     parser.add_argument("--json", action="store_true", help="启用JSON输出模式 (用于N8N集成)，只输出最终结果JSON到stdout，日志输出到stderr")
+    parser.add_argument("--no-summary", action="store_true", help="跳过内容总结")
+    parser.add_argument("--max-retries", type=int, default=int(os.getenv("MAX_RETRIES", 3)), help="最大重试次数")
+    parser.add_argument("--retry-intervals", default=os.getenv("RETRY_INTERVALS", "120,300,480"), help="重试间隔(秒)，逗号分隔")
     
     args = parser.parse_args()
 
@@ -200,12 +257,20 @@ def main():
         print(f"  LLM Engine: {args.llm_engine}")
         print(f"  Output Dir: {args.out}")
         print(f"  Output Format: {env_format}")
+        print(f"  Max Retries: {args.max_retries}")
+        print(f"  Retry Intervals: {args.retry_intervals}")
         if args.qwen_key:
             print(f"  Qwen Key: ******{args.qwen_key[-4:]}")
         if args.groq_key:
             print(f"  Groq Key: ******{args.groq_key[-4:]}")
 
-    run(target_url, args.out, args.model, args.lang, args.proxy, args.groq_key, args.qwen_key, args.llm_engine, args.asr_engine, json_mode=json_mode)
+    try:
+        retry_intervals_list = [int(x.strip()) for x in args.retry_intervals.split(",")]
+    except ValueError:
+        print("Error: Invalid retry-intervals format. Use comma separated integers (e.g. 120,300,480)", file=sys.stderr)
+        sys.exit(1)
+
+    run(target_url, args.out, args.model, args.lang, args.proxy, args.groq_key, args.qwen_key, args.llm_engine, args.asr_engine, json_mode=json_mode, no_summary=args.no_summary, max_retries=args.max_retries, retry_intervals=retry_intervals_list)
 
 
 if __name__ == "__main__":
