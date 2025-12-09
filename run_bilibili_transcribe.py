@@ -103,6 +103,7 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
                 
                 captured_summary_path = None
                 captured_optimized_path = None
+                captured_raw_txt_path = None
                 
                 while True:
                     line = process.stdout.readline()
@@ -115,6 +116,8 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
                             captured_summary_path = line_clean.split("AI 智能总结已生成:")[-1].strip()
                         elif "AI 优化文案已生成:" in line_clean:
                             captured_optimized_path = line_clean.split("AI 优化文案已生成:")[-1].strip()
+                        elif "原始转写文件:" in line_clean:
+                            captured_raw_txt_path = line_clean.split("原始转写文件:")[-1].strip()
                 
                 if process.returncode != 0:
                     attempt += 1
@@ -165,8 +168,8 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
                 if os.path.exists(optimized_path):
                     with open(optimized_path, "r", encoding="utf-8") as f:
                         result["content"] = f.read()
-            # If no summary captured (e.g. no_summary=True), try to find optimized text
-            elif no_summary:
+            # If no summary captured (e.g. no_summary=True or no LLM), try to find optimized text
+            elif no_summary or not captured_summary_path:
                  result["summary"] = None
                  
                  if captured_optimized_path and os.path.exists(captured_optimized_path):
@@ -177,13 +180,20 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
                      
                      with open(captured_optimized_path, "r", encoding="utf-8") as f:
                         result["content"] = f.read()
+                 elif captured_raw_txt_path and os.path.exists(captured_raw_txt_path):
+                     # Fallback to raw text if no optimization (e.g. LLM disabled)
+                     filename = os.path.basename(captured_raw_txt_path)
+                     title = filename.replace(".txt", "")
+                     result["title"] = title
+                     
+                     with open(captured_raw_txt_path, "r", encoding="utf-8") as f:
+                        result["content"] = f.read()
                  else:
                      result["content"] = None
                      result["title"] = None
-                     result["error"] = "Optimization skipped or file not found, but summary was also disabled."
+                     result["error"] = "No transcript found (neither optimized nor raw)."
             else:
-                 # Try to guess path if not captured (e.g. skipped because existed)
-                 # But for now, just report error or what we have
+                 # Should not reach here if logic covers all cases
                  result["error"] = "Summary file not found or captured."
 
             print(json.dumps(result, ensure_ascii=False))
@@ -269,6 +279,10 @@ def main():
     except ValueError:
         print("Error: Invalid retry-intervals format. Use comma separated integers (e.g. 120,300,480)", file=sys.stderr)
         sys.exit(1)
+
+    # Sanitize language code for Whisper (e.g., zh_CN.UTF-8 -> zh)
+    if args.lang and ('.' in args.lang or '_' in args.lang):
+        args.lang = args.lang.split('.')[0].split('_')[0]
 
     run(target_url, args.out, args.model, args.lang, args.proxy, args.groq_key, args.qwen_key, args.llm_engine, args.asr_engine, json_mode=json_mode, no_summary=args.no_summary, max_retries=args.max_retries, retry_intervals=retry_intervals_list)
 

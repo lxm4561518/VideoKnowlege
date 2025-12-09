@@ -384,7 +384,7 @@ def main():
     
     print("生成文件:")
     print(srt_path)
-    print(txt_path)
+    print(f"原始转写文件: {txt_path}")
     print(json_path)
 
 
