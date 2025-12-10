@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 import os
+import requests
+import re
 
 
 def parse_netscape_cookie_file(path):
@@ -23,16 +25,21 @@ def parse_netscape_cookie_file(path):
                 expiry = int(expiry)
             except Exception:
                 expiry = None
-            cookies.append({
+            host = (domain or "").lstrip(".")
+            if not host:
+                continue
+            c = {
                 "name": name,
                 "value": value,
-                "domain": domain,
+                "url": f"https://{host}",
                 "path": cpath or "/",
-                "expires": expiry,
                 "httpOnly": False,
                 "secure": secure.upper() == "TRUE",
-                "sameSite": "Lax",
-            })
+                "sameSite": "None",
+            }
+            if isinstance(expiry, int) and expiry > 0:
+                c["expires"] = expiry
+            cookies.append(c)
     return cookies
 
 
@@ -74,6 +81,53 @@ def main():
     cookies = parse_netscape_cookie_file(args.cookies_file)
     found_url = None
 
+    try:
+        hdr = None
+        jar = {}
+        with open(args.cookies_file, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.strip().split("\t")
+                if len(parts) != 7:
+                    continue
+                domain, tailmatch, cpath, secure, expiry, name, value = parts
+                jar[name] = value
+        if jar:
+            hdr = "; ".join([f"{k}={v}" for k, v in jar.items()])
+        h = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://www.bilibili.com/",
+        }
+        if hdr:
+            h["Cookie"] = hdr
+        r = requests.get(args.url, headers=h, timeout=15)
+        if r.status_code == 200:
+            m = re.search(r"__playinfo__\s*=\s*(\{[\s\S]*?\})", r.text)
+            if m:
+                try:
+                    data = json.loads(m.group(1))
+                    au = extract_audio_from_playurl_json(data)
+                    if au:
+                        found_url = au
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    if found_url:
+        m3u8_or_audio = found_url
+        cmd = [
+            sys.executable, "download_m3u8_and_transcribe.py",
+            "--m3u8", m3u8_or_audio,
+            "--out", args.out,
+            "--cookies-file", args.cookies_file,
+            "--model", args.model,
+            "--lang", args.lang,
+        ]
+        subprocess.run(cmd, check=True)
+        return
+
     with sync_playwright() as p:
         chrome_ud = Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"
         browser = None
@@ -89,7 +143,7 @@ def main():
             else:
                 raise RuntimeError("Chrome用户数据目录不存在")
         except Exception:
-            browser = p.chromium.launch(channel="chrome", headless=False)
+            browser = p.chromium.launch(headless=False)
             context = browser.new_context()
             if cookies:
                 context.add_cookies(cookies)
@@ -125,7 +179,8 @@ def main():
                     pass
 
         page.on("response", handle_response)
-        page.goto(args.url, wait_until="domcontentloaded")
+        if not found_url:
+            page.goto(args.url, wait_until="domcontentloaded")
         try:
             page.wait_for_selector("video", timeout=5000)
             page.evaluate("document.querySelector('video') && document.querySelector('video').play()")

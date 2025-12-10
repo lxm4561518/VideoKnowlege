@@ -169,6 +169,7 @@ def main():
     parser.add_argument("--audio-device", default=None, help="指定dshow音频设备名，如 'virtual-audio-capturer' 或 'Stereo Mix ...'")
     parser.add_argument("--model", default="small", help="whisper模型：tiny/base/small/medium/large-v3")
     parser.add_argument("--lang", default="zh", help="语言代码，如zh/en")
+    parser.add_argument("--engine", default=os.getenv("ASR_ENGINE", "whisper"), help="ASR引擎：whisper/funasr/vosk/groq/qwen")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
@@ -246,32 +247,41 @@ def main():
             ok = False
     else:
         ok = False
-        try:
-            ok = try_record_ffmpeg(out_wav, total_secs, args.audio_device)
-        except Exception:
-            ok = False
-        if not ok:
+        # 优先使用 soundcard 环路回录，随后再尝试 ffmpeg 和 sounddevice
+        for rec in (
+            lambda: record_stream_soundcard(out_wav, total_secs),
+            lambda: try_record_ffmpeg(out_wav, total_secs, args.audio_device),
+            lambda: try_record_sounddevice(out_wav, total_secs),
+        ):
             try:
-                ok = record_stream_soundcard(out_wav, total_secs)
+                ok = rec()
             except Exception:
                 ok = False
-        if not ok:
-            try:
-                ok = try_record_sounddevice(out_wav, total_secs)
-            except Exception as e:
-                print("录制错误:", e)
-                if ctx:
+            # 录完后检测静音，静音则认为失败并继续尝试下一种录制方式
+            if ok:
+                rms = _file_rms(out_wav)
+                if rms < 1e-3:
                     try:
-                        ctx.close()
+                        out_wav.unlink(missing_ok=True)
                     except Exception:
                         pass
-                sys.exit(1)
+                    ok = False
+                else:
+                    break
+        if not ok:
+            print("录制错误: 无法获取有效的系统音频，请检查扬声器/回录设备")
+            if ctx:
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+            sys.exit(1)
 
     print("录制完成：", str(out_wav))
     # 调用已有转写脚本
     cmd = [
         sys.executable, "transcribe_bilibili.py", str(out_wav),
-        "--out", args.out, "--engine", "whisper", "--model", args.model, "--lang", args.lang,
+        "--out", args.out, "--engine", args.engine, "--model", args.model, "--lang", args.lang,
         "--status-file", str(Path(args.out) / "status.json"),
     ]
     try:
@@ -288,3 +298,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+def _file_rms(wav_path: Path) -> float:
+    try:
+        data, sr = sf.read(str(wav_path))
+        if data is None or getattr(data, 'size', 0) == 0:
+            return 0.0
+        import numpy as _np
+        mono = data if data.ndim == 1 else _np.mean(data, axis=1)
+        return float(_np.sqrt(_np.mean(mono.astype('float32') ** 2)))
+    except Exception:
+        return 0.0

@@ -28,6 +28,10 @@ def download_audio(url, out_dir, cookies_from_browser=None, cookies_file=None, p
         "outtmpl": str(out_dir / "%(title)s" / "%(title)s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
+        "retries": 3,
+        "socket_timeout": 10,
+        "nocheckcertificate": True,
+        "ignoreerrors": True,
     }
     if cookies_from_browser:
         browser = cookies_from_browser.strip().lower()
@@ -67,34 +71,6 @@ def download_audio(url, out_dir, cookies_from_browser=None, cookies_file=None, p
             }
         ]
     with YoutubeDL(ydl_opts) as ydl:
-        # First try to get info without downloading to check if file exists
-        try:
-            info = ydl.extract_info(url, download=False)
-            downloaded_path_str = ydl.prepare_filename(info)
-            downloaded_path = Path(downloaded_path_str)
-            search_dir = downloaded_path.parent
-            title_stem = downloaded_path.stem
-            
-            # Check if target audio file already exists
-            existing_audio = None
-            if ensure_ffmpeg():
-                # If ffmpeg is enabled, we expect a .wav file
-                candidate = search_dir / f"{title_stem}.wav"
-                if candidate.exists():
-                    existing_audio = candidate
-            else:
-                # If no ffmpeg, check for original extension
-                if downloaded_path.exists():
-                    existing_audio = downloaded_path
-            
-            if existing_audio:
-                print(f"Found existing audio file: {existing_audio}")
-                return str(existing_audio)
-                
-        except Exception as e:
-            print(f"Pre-check failed, proceeding with download: {e}")
-            pass
-
         info = ydl.extract_info(url, download=True)
     
     # Determine where the file ended up
@@ -248,12 +224,12 @@ def transcribe_vosk(audio_path, model_path):
     return segments
 
 
-import groq_service
-import qwen_service
+# 可选依赖延迟导入，避免未使用时引入失败
 
 def transcribe_groq_wrapper(audio_path, api_key, status_file=None):
     _update_status(status_file, phase="transcribing", segments_count=0)
     try:
+        import groq_service
         segments = groq_service.transcribe_audio_groq(audio_path, api_key)
         _update_status(status_file, phase="transcribed", segments_count=len(segments))
         return segments
@@ -261,12 +237,74 @@ def transcribe_groq_wrapper(audio_path, api_key, status_file=None):
         _update_status(status_file, error=str(e))
         raise e
 
+def _funasr_result_to_text(result):
+    if isinstance(result, list):
+        texts = []
+        for r in result:
+            if isinstance(r, dict) and "text" in r:
+                texts.append(r["text"]) 
+            else:
+                texts.append(str(r))
+        return "".join(texts)
+    elif isinstance(result, dict):
+        return result.get("text", "")
+    else:
+        return str(result)
+
+def _text_to_segments(audio_path, full_text, status_file):
+    full_text = full_text.strip()
+    if not full_text:
+        _update_status(status_file, phase="transcribed", segments_count=0)
+        return []
+    duration = None
+    try:
+        if audio_path.lower().endswith(".wav"):
+            import wave
+            wf = wave.open(audio_path, "rb")
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            duration = frames / float(rate)
+            wf.close()
+    except Exception:
+        duration = None
+    import re as _re
+    sentences = [s.strip() for s in _re.split(r"(?<=[。！？!?])", full_text) if s.strip()]
+    segments = []
+    if duration and len(sentences) > 1:
+        avg = max(0.5, duration / len(sentences))
+        start = 0.0
+        for s in sentences:
+            end = start + avg
+            segments.append({"start": round(start, 3), "end": round(end, 3), "text": s})
+            start = end
+    else:
+        segments.append({"start": 0.0, "end": duration or 0.0, "text": full_text})
+    _update_status(status_file, phase="transcribed", segments_count=len(segments))
+    return segments
+
+def transcribe_funasr(audio_path, status_file=None):
+    _update_status(status_file, phase="transcribing", segments_count=0)
+    try:
+        from funasr import AutoModel
+    except Exception as e:
+        _update_status(status_file, error=str(e))
+        raise RuntimeError("FunASR 未安装或初始化失败，请安装并重试")
+    model = AutoModel(
+        model="paraformer-zh",
+        hub="hf",
+        device="cpu",
+        disable_update=True,
+    )
+    result = model.generate(input=audio_path)
+    full_text = _funasr_result_to_text(result)
+    return _text_to_segments(audio_path, full_text, status_file)
+
 
 def main():
     parser = argparse.ArgumentParser(description="B站URL离线音频转写")
     parser.add_argument("url", help="B站视频页面URL")
     parser.add_argument("--out", default="downloads", help="下载输出目录")
-    parser.add_argument("--engine", choices=["whisper", "vosk", "groq", "qwen"], default="whisper")
+    parser.add_argument("--engine", choices=["whisper", "vosk", "groq", "qwen", "funasr"], default="whisper")
     parser.add_argument("--model", default="small", help="whisper模型：tiny/base/small/medium/large-v2/large-v3")
     parser.add_argument("--lang", default=None, help="语言代码，如zh/en，留空自动检测")
     parser.add_argument("--device", default="cpu", help="设备：cpu/cuda")
@@ -279,7 +317,6 @@ def main():
     parser.add_argument("--groq-key", default=None, help="Groq API Key")
     parser.add_argument("--qwen-key", default=None, help="Qwen (DashScope) API Key")
     parser.add_argument("--llm-engine", choices=["groq", "qwen"], default=None, help="LLM引擎：groq/qwen，用于优化和总结")
-    parser.add_argument("--no-summary", action="store_true", help="Skip summary generation")
     args = parser.parse_args()
 
     audio_path = download_audio(
@@ -293,37 +330,48 @@ def main():
 
     # Check if outputs exist to skip re-transcription
     final_txt = base + ".txt"
-    transcription_skipped = False
     if os.path.exists(final_txt) and os.path.getsize(final_txt) > 0:
         print("检测到已有转写结果，跳过转写步骤。")
-        srt_path = base + ".srt"
-        txt_path = final_txt
-        json_path = base + ".json"
-        transcription_skipped = True
-    else:
-        if args.engine == "whisper":
-            segments = transcribe_whisper(audio_path, args.model, args.lang, args.device, args.compute_type, status_file=args.status_file)
-        elif args.engine == "groq":
-            if not args.groq_key:
-                raise ValueError("Engine is Groq but no --groq-key provided")
-            segments = transcribe_groq_wrapper(audio_path, args.groq_key, status_file=args.status_file)
-        elif args.engine == "qwen":
-            if not args.qwen_key:
-                raise ValueError("Engine is Qwen but no --qwen-key provided")
-            segments = qwen_service.transcribe_audio_qwen(
-                audio_path, 
-                args.qwen_key,
-                status_callback=lambda phase, segments_count=None: _update_status(args.status_file, phase=phase, segments_count=segments_count)
-            )
-        else:
-            segments = transcribe_vosk(audio_path, args.vosk_model_path)
+        print("生成文件:")
+        print(base + ".srt")
+        print(final_txt)
+        print(base + ".json")
+        # Even if transcribed, we might want to run AI summary if requested and not present
+        # But for now let's keep simple logic
+        return
 
-        srt_path, txt_path, json_path = write_outputs(base, segments)
+    if args.engine == "whisper":
+        segments = transcribe_whisper(audio_path, args.model, args.lang, args.device, args.compute_type, status_file=args.status_file)
+    elif args.engine == "groq":
+        if not args.groq_key:
+            raise ValueError("Engine is Groq but no --groq-key provided")
+        segments = transcribe_groq_wrapper(audio_path, args.groq_key, status_file=args.status_file)
+    elif args.engine == "qwen":
+        if not args.qwen_key:
+            raise ValueError("Engine is Qwen but no --qwen-key provided")
+        import qwen_service
+        segments = qwen_service.transcribe_audio_qwen(
+            audio_path, 
+            args.qwen_key,
+            status_callback=lambda phase, segments_count=None: _update_status(args.status_file, phase=phase, segments_count=segments_count)
+        )
+    elif args.engine == "funasr":
+        segments = transcribe_funasr(audio_path, status_file=args.status_file)
+    else:
+        segments = transcribe_vosk(audio_path, args.vosk_model_path)
+
+    srt_path, txt_path, json_path = write_outputs(base, segments)
     
     # Post-processing with LLM (Optimization & Summary)
     llm_engine = args.llm_engine
-    # Backward compatibility logic omitted for brevity as we focus on llm_engine
-
+    # Backward compatibility: if groq-key is present and no llm-engine specified, default to groq (only if engine was groq? No, maybe user wants whisper+groq)
+    # Let's be explicit: Only if llm-engine is set OR (groq-key is set AND engine is groq - implicit)
+    # Actually, better to just check keys if llm-engine is not set?
+    # If user provided groq-key but didn't specify llm-engine, we assume they might want it?
+    # Let's stick to explicit --llm-engine or existing behavior.
+    # Existing behavior: if args.groq_key: do it.
+    # We should preserve that for now to avoid breaking changes, but prioritize llm_engine.
+    
     if not llm_engine and args.groq_key:
         llm_engine = "groq"
     elif not llm_engine and args.qwen_key:
@@ -334,57 +382,47 @@ def main():
         _update_status(args.status_file, phase="optimizing")
         
         try:
-            optimized_path = base + "_optimized.txt"
-            summary_path = base + "_summary.md"
+            # Read the full text
+            with open(txt_path, "r", encoding="utf-8") as f:
+                raw_text = f.read()
             
-            # Check if optimization already exists
-            if os.path.exists(optimized_path) and os.path.getsize(optimized_path) > 0:
-                 print(f"AI 优化文案已生成: {optimized_path}")
-                 with open(optimized_path, "r", encoding="utf-8") as f:
-                     optimized_text = f.read()
-            else:
-                # Read the full text
-                with open(txt_path, "r", encoding="utf-8") as f:
-                    raw_text = f.read()
-                
-                # 1. Optimize
-                if llm_engine == "groq":
-                    if not args.groq_key:
-                         raise ValueError("需要 Groq API Key")
-                    optimized_text = groq_service.optimize_transcript_groq(raw_text, args.groq_key)
-                elif llm_engine == "qwen":
-                    if not args.qwen_key:
-                         raise ValueError("需要 Qwen API Key")
-                    optimized_text = qwen_service.optimize_transcript_qwen(raw_text, args.qwen_key)
-                
-                with open(optimized_path, "w", encoding="utf-8") as f:
-                    f.write(optimized_text)
-                print(f"AI 优化文案已生成: {optimized_path}")
+            # 1. Optimize
+            if llm_engine == "groq":
+                if not args.groq_key:
+                     raise ValueError("需要 Groq API Key")
+                import groq_service
+                optimized_text = groq_service.optimize_transcript_groq(raw_text, args.groq_key)
+            elif llm_engine == "qwen":
+                if not args.qwen_key:
+                     raise ValueError("需要 Qwen API Key")
+                import qwen_service
+                optimized_text = qwen_service.optimize_transcript_qwen(raw_text, args.qwen_key)
+            
+            optimized_path = base + "_optimized.txt"
+            with open(optimized_path, "w", encoding="utf-8") as f:
+                f.write(optimized_text)
+            print(f"AI 优化文案已生成: {optimized_path}")
             
             # 2. Summarize
-            if args.no_summary:
-                print("跳过 AI 智能总结 (requested by --no-summary)")
-            elif os.path.exists(summary_path) and os.path.getsize(summary_path) > 0:
-                print(f"AI 智能总结已生成: {summary_path}")
-            else:
-                if llm_engine == "groq":
-                    summary_text = groq_service.summarize_transcript_groq(optimized_text, args.groq_key)
-                elif llm_engine == "qwen":
-                    summary_text = qwen_service.summarize_transcript_qwen(optimized_text, args.qwen_key)
+            if llm_engine == "groq":
+                import groq_service
+                summary_text = groq_service.summarize_transcript_groq(optimized_text, args.groq_key)
+            elif llm_engine == "qwen":
+                import qwen_service
+                summary_text = qwen_service.summarize_transcript_qwen(optimized_text, args.qwen_key)
 
-                with open(summary_path, "w", encoding="utf-8") as f:
-                    f.write(summary_text)
-                print(f"AI 智能总结已生成: {summary_path}")
+            summary_path = base + "_summary.md"
+            with open(summary_path, "w", encoding="utf-8") as f:
+                f.write(summary_text)
+            print(f"AI 智能总结已生成: {summary_path}")
             
         except Exception as e:
             print(f"AI 处理失败: {e}")
 
-    if not transcription_skipped:
-        _update_status(args.status_file, phase="done", segments_count=len(segments))
-    
+    _update_status(args.status_file, phase="done", segments_count=len(segments))
     print("生成文件:")
     print(srt_path)
-    print(f"原始转写文件: {txt_path}")
+    print(txt_path)
     print(json_path)
 
 

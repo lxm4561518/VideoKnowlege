@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 import uvicorn
 import subprocess
@@ -19,7 +20,6 @@ logger = logging.getLogger(__name__)
 # 定义请求数据模型
 class TranscriptRequest(BaseModel):
     bilibili_url: str
-    need_summary: bool = False # 默认不需要做内容总结
 
 # 定义响应数据模型
 class TranscriptResponse(BaseModel):
@@ -35,8 +35,7 @@ async def create_transcript(request: TranscriptRequest):
     接收 B 站 URL，调用原有逻辑处理视频并返回文案
     """
     bilibili_url = request.bilibili_url
-    need_summary = request.need_summary
-    logger.info(f"Received request for URL: {bilibili_url}, need_summary: {need_summary}")
+    logger.info(f"Received request for URL: {bilibili_url}")
     
     # 设定工作目录为当前脚本所在目录
     cwd = str(Path(__file__).parent.absolute())
@@ -50,9 +49,6 @@ async def create_transcript(request: TranscriptRequest):
             bilibili_url, 
             '--json'
         ]
-        
-        if not need_summary:
-            cmd.append('--no-summary')
         
         # 继承当前环境变量 (包括 PATH, 还有 .env 加载的那些如果已经被加载)
         # 并强制设置 PYTHONIOENCODING 为 utf-8，确保子进程输出为 UTF-8
@@ -74,37 +70,28 @@ async def create_transcript(request: TranscriptRequest):
         if result.returncode == 0:
             # 解析原有脚本的 JSON 输出
             try:
-                # stdout 应该只包含 JSON
                 output_data = json.loads(result.stdout)
-                
-                # 检查是否有错误字段
                 if "error" in output_data and output_data["error"]:
-                     logger.error(f"Script returned error: {output_data['error']}")
-                     return TranscriptResponse(
-                        success=False,
-                        error=output_data["error"]
-                    )
-                
-                return TranscriptResponse(
-                    success=True,
-                    title=output_data.get('title'),
-                    summary=output_data.get('summary'),
-                    content=output_data.get('content')
-                )
+                    payload = {"success": False, "error": output_data["error"], "title": None, "content": None, "summary": None}
+                    return Response(content=json.dumps(payload, ensure_ascii=False), media_type="application/json; charset=utf-8")
+                payload = {
+                    "success": True,
+                    "title": output_data.get("title"),
+                    "summary": output_data.get("summary"),
+                    "content": output_data.get("content"),
+                    "error": None,
+                }
+                return Response(content=json.dumps(payload, ensure_ascii=False), media_type="application/json; charset=utf-8")
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to decode JSON: {e}")
                 logger.error(f"Stdout content: {result.stdout}")
-                return TranscriptResponse(
-                    success=False,
-                    error=f"JSON Decode Error: {str(e)}. Raw output: {result.stdout[:500]}..."
-                )
+                payload = {"success": False, "error": f"JSON Decode Error: {str(e)}. Raw output: {result.stdout[:500]}...", "title": None, "content": None, "summary": None}
+                return Response(content=json.dumps(payload, ensure_ascii=False), media_type="application/json; charset=utf-8")
         else:
             logger.error(f"Process failed with return code {result.returncode}")
             logger.error(f"Stderr: {result.stderr}")
-            return TranscriptResponse(
-                success=False,
-                error=f"Process failed. Stderr: {result.stderr}"
-            )
+            payload = {"success": False, "error": f"Process failed. Stderr: {result.stderr}", "title": None, "content": None, "summary": None}
+            return Response(content=json.dumps(payload, ensure_ascii=False), media_type="application/json; charset=utf-8")
             
     except Exception as e:
         logger.error(f"Internal Server Error: {str(e)}")
