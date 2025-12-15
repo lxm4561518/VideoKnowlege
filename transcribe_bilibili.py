@@ -5,6 +5,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from yt_dlp import YoutubeDL
@@ -95,10 +96,13 @@ def download_audio(url, out_dir, cookies_from_browser=None, cookies_file=None, p
             print(f"Pre-check failed, proceeding with download: {e}")
             pass
 
+        print(f"[{time.strftime('%H:%M:%S')}] 开始下载音频并进行格式转换 (FFmpeg)...")
         info = ydl.extract_info(url, download=True)
+        print(f"[{time.strftime('%H:%M:%S')}] 音频下载及转换完成。")
     
     # Determine where the file ended up
     # prepare_filename gives the path based on info and outtmpl
+    print(f"[{time.strftime('%H:%M:%S')}] 开始定位下载的音频文件...")
     downloaded_path_str = ydl.prepare_filename(info)
     downloaded_path = Path(downloaded_path_str)
     
@@ -137,6 +141,8 @@ def download_audio(url, out_dir, cookies_from_browser=None, cookies_file=None, p
 
     if audio_path is None:
         raise RuntimeError("音频下载失败")
+    
+    print(f"[{time.strftime('%H:%M:%S')}] 已定位到音频文件: {audio_path}")
     return str(audio_path)
 
 
@@ -169,7 +175,7 @@ def _update_status(status_file, phase=None, segments_count=None, eta_secs=None, 
     if not status_file:
         return
     try:
-        import json, time
+        import json
         payload = {"ts": int(time.time())}
         if phase is not None:
             payload["phase"] = phase
@@ -187,15 +193,38 @@ def _update_status(status_file, phase=None, segments_count=None, eta_secs=None, 
 
 def transcribe_whisper(audio_path, model_size, language, device, compute_type, status_file=None):
     from faster_whisper import WhisperModel
+    print(f"Loading Whisper model: {model_size} on {device}...")
     model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    gen, _ = model.transcribe(audio_path, language=language, vad_filter=True)
-    out = []
-    _update_status(status_file, phase="transcribing", segments_count=0)
-    for seg in gen:
-        out.append({"start": seg.start or 0.0, "end": seg.end or 0.0, "text": seg.text})
-        _update_status(status_file, phase="transcribing", segments_count=len(out))
-    _update_status(status_file, phase="transcribed", segments_count=len(out))
-    return out
+    print(f"Starting transcription for {audio_path}...")
+    
+    # Define a helper to run transcription
+    def run_transcribe(vad_option):
+        print(f"Running Whisper with vad_filter={vad_option}...")
+        gen, info = model.transcribe(audio_path, language=language, vad_filter=vad_option)
+        print(f"Detected language: {info.language} with probability {info.language_probability}")
+        segments_data = []
+        _update_status(status_file, phase="transcribing", segments_count=0)
+        for seg in gen:
+            segments_data.append({"start": seg.start or 0.0, "end": seg.end or 0.0, "text": seg.text})
+            if len(segments_data) % 10 == 0:
+                print(f"Transcribed {len(segments_data)} segments...")
+            _update_status(status_file, phase="transcribing", segments_count=len(segments_data))
+        return segments_data
+
+    try:
+        # First attempt with VAD enabled
+        out = run_transcribe(True)
+        
+        # If no segments found, retry with VAD disabled
+        if len(out) == 0:
+            print("Warning: No segments found with VAD enabled. Retrying with VAD disabled...")
+            out = run_transcribe(False)
+            
+        _update_status(status_file, phase="transcribed", segments_count=len(out))
+        return out
+    except Exception as e:
+        print(f"Whisper transcription error: {e}")
+        raise e
 
 
 def transcribe_vosk(audio_path, model_path):
@@ -248,11 +277,21 @@ def transcribe_vosk(audio_path, model_path):
     return segments
 
 
-import groq_service
-import qwen_service
+try:
+    import groq_service
+except Exception:
+    groq_service = None
+
+try:
+    import qwen_service
+except Exception:
+    qwen_service = None
 
 def transcribe_groq_wrapper(audio_path, api_key, status_file=None):
     _update_status(status_file, phase="transcribing", segments_count=0)
+    if groq_service is None:
+        _update_status(status_file, error="groq 未安装或不可用")
+        raise ImportError("缺少依赖: groq。请先 pip install groq 或关闭 Groq 功能")
     try:
         segments = groq_service.transcribe_audio_groq(audio_path, api_key)
         _update_status(status_file, phase="transcribed", segments_count=len(segments))
@@ -289,18 +328,41 @@ def main():
         cookies_file=args.cookies_file,
         proxy=args.proxy,
     )
+    try:
+        size_b = os.path.getsize(audio_path)
+        print(f"下载音频成功: {audio_path} 大小: {size_b} 字节")
+    except Exception:
+        pass
     base = os.path.splitext(audio_path)[0]
 
     # Check if outputs exist to skip re-transcription
     final_txt = base + ".txt"
     transcription_skipped = False
     if os.path.exists(final_txt) and os.path.getsize(final_txt) > 0:
-        print("检测到已有转写结果，跳过转写步骤。")
-        srt_path = base + ".srt"
-        txt_path = final_txt
+        # Verify JSON is also valid
         json_path = base + ".json"
-        transcription_skipped = True
+        if os.path.exists(json_path) and os.path.getsize(json_path) > 10: # Min size for valid JSON
+            print("检测到已有转写结果，跳过转写步骤。")
+            srt_path = base + ".srt"
+            txt_path = final_txt
+            transcription_skipped = True
+            
+            # Load existing segments for accurate reporting if needed
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    segments = data.get("segments", [])
+            except:
+                segments = []
+        else:
+            print("检测到已有文本结果但JSON无效，重新转写...")
+            transcription_skipped = False
+            segments = []
     else:
+        transcription_skipped = False
+        segments = []
+
+    if not transcription_skipped:
         if args.engine == "whisper":
             segments = transcribe_whisper(audio_path, args.model, args.lang, args.device, args.compute_type, status_file=args.status_file)
         elif args.engine == "groq":
@@ -310,6 +372,8 @@ def main():
         elif args.engine == "qwen":
             if not args.qwen_key:
                 raise ValueError("Engine is Qwen but no --qwen-key provided")
+            if qwen_service is None:
+                raise ImportError("缺少 Qwen 相关依赖，请安装后再使用该引擎")
             segments = qwen_service.transcribe_audio_qwen(
                 audio_path, 
                 args.qwen_key,
@@ -318,7 +382,17 @@ def main():
         else:
             segments = transcribe_vosk(audio_path, args.vosk_model_path)
 
+        try:
+            print(f"转写段数: {len(segments)}")
+        except Exception:
+            pass
         srt_path, txt_path, json_path = write_outputs(base, segments)
+        try:
+            tsz = os.path.getsize(txt_path)
+            print(f"原始转写文件: {txt_path}")
+            print(f"原始转写大小: {tsz} 字节")
+        except Exception:
+            print(f"原始转写文件: {txt_path}")
     
     # Post-processing with LLM (Optimization & Summary)
     llm_engine = args.llm_engine
@@ -351,10 +425,14 @@ def main():
                 if llm_engine == "groq":
                     if not args.groq_key:
                          raise ValueError("需要 Groq API Key")
+                    if groq_service is None:
+                         raise ImportError("缺少依赖: groq。请先 pip install groq 或将 llm-engine 设为 qwen/关闭")
                     optimized_text = groq_service.optimize_transcript_groq(raw_text, args.groq_key)
                 elif llm_engine == "qwen":
                     if not args.qwen_key:
                          raise ValueError("需要 Qwen API Key")
+                    if qwen_service is None:
+                         raise ImportError("缺少 Qwen 依赖，请安装对应 SDK")
                     optimized_text = qwen_service.optimize_transcript_qwen(raw_text, args.qwen_key)
                 
                 with open(optimized_path, "w", encoding="utf-8") as f:
@@ -368,8 +446,12 @@ def main():
                 print(f"AI 智能总结已生成: {summary_path}")
             else:
                 if llm_engine == "groq":
+                    if groq_service is None:
+                        raise ImportError("缺少依赖: groq。请先安装或关闭 Groq 总结功能")
                     summary_text = groq_service.summarize_transcript_groq(optimized_text, args.groq_key)
                 elif llm_engine == "qwen":
+                    if qwen_service is None:
+                        raise ImportError("缺少 Qwen 依赖，请安装对应 SDK")
                     summary_text = qwen_service.summarize_transcript_qwen(optimized_text, args.qwen_key)
 
                 with open(summary_path, "w", encoding="utf-8") as f:

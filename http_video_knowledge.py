@@ -42,69 +42,73 @@ async def create_transcript(request: TranscriptRequest):
     cwd = str(Path(__file__).parent.absolute())
     
     try:
-        # 调用 run_bilibili_transcribe.py
-        # 使用 sys.executable 确保使用当前 Python 环境
+        venv_python = Path(cwd) / ".venv" / "Scripts" / "python.exe"
+        exe = str(venv_python) if venv_python.exists() else sys.executable
         cmd = [
-            sys.executable, 
-            'run_bilibili_transcribe.py', 
-            bilibili_url, 
+            exe,
+            'run_bilibili_transcribe.py',
+            bilibili_url,
             '--json'
         ]
-        
         if not need_summary:
             cmd.append('--no-summary')
-        
-        # 继承当前环境变量 (包括 PATH, 还有 .env 加载的那些如果已经被加载)
-        # 并强制设置 PYTHONIOENCODING 为 utf-8，确保子进程输出为 UTF-8
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
-        
+        logger.info(f"Using interpreter: {exe}")
         logger.info(f"Executing command: {' '.join(cmd)}")
-        
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
+        process = subprocess.Popen(
+            cmd,
             cwd=cwd,
-            encoding='utf-8',
             env=env,
-            errors='replace' # 防止编码错误导致 crash
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8',
+            errors='replace'
         )
-        
-        if result.returncode == 0:
-            # 解析原有脚本的 JSON 输出
+        while True:
+            line = process.stderr.readline()
+            if not line and process.poll() is not None:
+                break
+            if line:
+                logger.info(line.rstrip())
+        stdout_data = process.stdout.read() or ""
+        ret = process.wait()
+        if ret == 0:
             try:
-                # stdout 应该只包含 JSON
-                output_data = json.loads(result.stdout)
-                
-                # 检查是否有错误字段
+                output_data = json.loads(stdout_data)
                 if "error" in output_data and output_data["error"]:
-                     logger.error(f"Script returned error: {output_data['error']}")
-                     return TranscriptResponse(
-                        success=False,
-                        error=output_data["error"]
-                    )
-                
+                    return TranscriptResponse(success=False, error=output_data["error"])
+                content_val = output_data.get('content')
+                if content_val is None or (isinstance(content_val, str) and not content_val.strip()):
+                    logger.error("Empty content returned; check previous stderr logs for stage failures")
                 return TranscriptResponse(
                     success=True,
                     title=output_data.get('title'),
                     summary=output_data.get('summary'),
-                    content=output_data.get('content')
+                    content=content_val
                 )
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to decode JSON: {e}")
-                logger.error(f"Stdout content: {result.stdout}")
+                logger.error(f"Stdout content: {stdout_data}")
+                return TranscriptResponse(success=False, error=f"JSON Decode Error: {str(e)}. Raw output: {stdout_data[:500]}...")
+        else:
+            stderr_data = process.stderr.read() or ""
+            if stdout_data:
+                logger.error(f"Stdout: {stdout_data[:500]}")
+            if stderr_data:
+                logger.error(f"Stderr: {stderr_data[:500]}")
+            try:
+                parsed = json.loads(stdout_data)
                 return TranscriptResponse(
                     success=False,
-                    error=f"JSON Decode Error: {str(e)}. Raw output: {result.stdout[:500]}..."
+                    title=parsed.get('title'),
+                    summary=parsed.get('summary'),
+                    content=parsed.get('content'),
+                    error=parsed.get('error') or f"Process failed. Stderr: {stderr_data}"
                 )
-        else:
-            logger.error(f"Process failed with return code {result.returncode}")
-            logger.error(f"Stderr: {result.stderr}")
-            return TranscriptResponse(
-                success=False,
-                error=f"Process failed. Stderr: {result.stderr}"
-            )
+            except Exception:
+                return TranscriptResponse(success=False, error=f"Process failed. Stderr: {stderr_data} Stdout: {stdout_data[:500]}")
             
     except Exception as e:
         logger.error(f"Internal Server Error: {str(e)}")

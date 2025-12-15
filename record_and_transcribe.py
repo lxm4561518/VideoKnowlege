@@ -10,6 +10,15 @@ import numpy as np
 import soundfile as sf
 from playwright.sync_api import sync_playwright
 import json
+import re
+
+
+def sanitize_filename(name: str) -> str:
+    name = re.sub(r'[\\/*?:"<>|]', '_', name)
+    name = name.strip()
+    if not name:
+        return f"video_{int(time.time())}"
+    return name
 
 
 def get_ffmpeg_path():
@@ -22,19 +31,86 @@ def get_ffmpeg_path():
     return None
 
 
+def get_dshow_audio_devices(ffmpeg_path: str) -> list:
+    """Run ffmpeg to list dshow audio devices and return a list of device names."""
+    try:
+        # Run ffmpeg command to list devices.
+        # It usually outputs to stderr.
+        # cmd: ffmpeg -list_devices true -f dshow -i dummy
+        cmd = [ffmpeg_path, "-list_devices", "true", "-f", "dshow", "-i", "dummy"]
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        output = result.stderr
+        
+        devices = []
+        # Parse output for "[dshow @ ...]  "Device Name""
+        # The output format is usually like:
+        # [dshow @ ...] DirectShow audio devices
+        # [dshow @ ...]  "Microphone (Realtek Audio)"
+        # [dshow @ ...]  "Stereo Mix (Realtek Audio)"
+        
+        in_audio_section = False
+        for line in output.splitlines():
+            if "DirectShow audio devices" in line:
+                in_audio_section = True
+                continue
+            if "DirectShow video devices" in line:
+                in_audio_section = False
+                continue
+            
+            if in_audio_section:
+                # Regex to extract device name inside quotes
+                match = re.search(r'\[dshow @ .*?\]\s+"([^"]+)"', line)
+                if match:
+                    devices.append(match.group(1))
+        return devices
+    except Exception as e:
+        print(f"Error listing dshow devices: {e}")
+        return []
+
+
 def try_record_ffmpeg(out_wav: Path, duration: int, audio_device: str = None):
     ff = get_ffmpeg_path()
     if not ff:
         raise RuntimeError("未检测到ffmpeg，请安装或确保Playwright的ffmpeg可用")
+    
     cmds = []
+    
+    # 1. Dynamic discovery of dshow devices
+    print("正在探测可用音频设备...", flush=True)
+    discovered_devices = get_dshow_audio_devices(ff)
+    print(f"发现设备: {discovered_devices}", flush=True)
+
+    # Priority list of keywords to look for in discovered devices
+    priority_keywords = ["virtual-audio-capturer", "Stereo Mix", "立体声混音", "What U Hear"]
+    
+    # If user specified a device, try it first
     if audio_device:
-        cmds.append([
+         cmds.append([
             ff, "-hide_banner", "-y",
             "-f", "dshow", "-i", f"audio={audio_device}",
             "-t", str(duration),
             "-ac", "1", "-ar", "16000", "-vn",
             str(out_wav),
         ])
+
+    # Try discovered devices that match keywords
+    for keyword in priority_keywords:
+        for dev in discovered_devices:
+            if keyword.lower() in dev.lower():
+                cmds.append([
+                    ff, "-hide_banner", "-y",
+                    "-f", "dshow", "-i", f"audio={dev}",
+                    "-t", str(duration),
+                    "-ac", "1", "-ar", "16000", "-vn",
+                    str(out_wav),
+                ])
+    
+    # Fallback 1: Try all other discovered devices (maybe dangerous if it picks a mic, but better than nothing?)
+    # Let's skip this for now to avoid recording random mics unless we are desperate.
+    # User feedback says "gracefully degrade to mic if user agrees". 
+    # For now, let's stick to system audio attempts.
+    
+    # Fallback 2: Hardcoded "virtual-audio-capturer" if not found in list (sometimes list fails or hidden)
     cmds.append([
         ff, "-hide_banner", "-y",
         "-f", "dshow", "-i", "audio=virtual-audio-capturer",
@@ -42,6 +118,8 @@ def try_record_ffmpeg(out_wav: Path, duration: int, audio_device: str = None):
         "-ac", "1", "-ar", "16000", "-vn",
         str(out_wav),
     ])
+    
+    # Fallback 3: Hardcoded "Stereo Mix"
     cmds.append([
         ff, "-hide_banner", "-y",
         "-f", "dshow", "-i", "audio=Stereo Mix (Realtek(R) Audio)",
@@ -49,6 +127,8 @@ def try_record_ffmpeg(out_wav: Path, duration: int, audio_device: str = None):
         "-ac", "1", "-ar", "16000", "-vn",
         str(out_wav),
     ])
+    
+    # Fallback 4: WASAPI loopback (ffmpeg feature)
     cmds.append([
         ff, "-hide_banner", "-y",
         "-f", "wasapi", "-i", "default",
@@ -56,16 +136,182 @@ def try_record_ffmpeg(out_wav: Path, duration: int, audio_device: str = None):
         "-ac", "1", "-ar", "16000", "-vn",
         str(out_wav),
     ])
+
     last_error = None
-    for cmd in cmds:
+    for i, cmd in enumerate(cmds):
         try:
+            # Check if we've already tried this exact command args to avoid duplicates
+            # (simple check not implemented for brevity, but duplicates are harmless usually)
+            device_name = "unknown"
+            for arg in cmd:
+                if arg.startswith("audio="):
+                    device_name = arg.split("=", 1)[1]
+                elif arg == "default" and "wasapi" in cmd:
+                    device_name = "WASAPI Default"
+            
+            print(f"尝试录制方案 {i+1}: {device_name}", flush=True)
             subprocess.run(cmd, check=True)
             return True
         except Exception as e:
+            print(f"方案 {i+1} 失败: {e}", flush=True)
             last_error = e
+            
     if last_error:
         raise last_error
     return False
+
+
+def try_record_pyaudiowpatch(out_wav: Path, duration: int, samplerate: int = 16000):
+    """
+    Attempt to record system audio using PyAudioWPatch (WASAPI Loopback).
+    Records at device native rate/channels to avoid artifacts.
+    Includes silence detection and real-time RMS logging.
+    """
+    try:
+        import pyaudiowpatch as pyaudio
+        import wave
+        import numpy as np
+    except ImportError:
+        print("PyAudioWPatch or numpy not installed. Skipping.")
+        return False
+
+    p = pyaudio.PyAudio()
+    try:
+        print("正在尝试使用 PyAudioWPatch (WASAPI Loopback) 录制...", flush=True)
+        
+        # Method 1: Try to get default WASAPI loopback device directly (Recommended)
+        loopback_device = None
+        
+        # Helper to check if device is likely a monitor/HDMI (often silent)
+        def is_monitor_audio(name):
+            keywords = ["display", "monitor", "hdmi", "nvidia", "amd", "phl ", "dell", "aoc", "samsung", "lg"]
+            name_lower = name.lower()
+            return any(k in name_lower for k in keywords) and "speaker" not in name_lower
+
+        try:
+            # First, list all available loopback devices to make a smart choice
+            all_loopbacks = []
+            if hasattr(p, 'get_loopback_device_info_generator'):
+                for info in p.get_loopback_device_info_generator():
+                    all_loopbacks.append(info)
+            
+            if all_loopbacks:
+                print(f"PyAudioWPatch: 发现 {len(all_loopbacks)} 个 Loopback 设备:", flush=True)
+                for i, d in enumerate(all_loopbacks):
+                    print(f"  [{i}] {d['name']}", flush=True)
+                
+                # Filter out monitors if possible
+                candidates = [d for d in all_loopbacks if not is_monitor_audio(d['name'])]
+                
+                if candidates:
+                    # Pick the first non-monitor device (usually Speakers or Headphones)
+                    loopback_device = candidates[0]
+                    print(f"PyAudioWPatch: 智能优选设备 -> {loopback_device['name']}", flush=True)
+                else:
+                    # Fallback to default if all look like monitors
+                    print("PyAudioWPatch: 未发现常用音频设备，将尝试使用默认设备。", flush=True)
+
+            # If smart selection didn't work, fallback to default method
+            if not loopback_device and hasattr(p, 'get_default_wasapi_loopback'):
+                loopback_device = p.get_default_wasapi_loopback()
+                if is_monitor_audio(loopback_device['name']):
+                    print(f"⚠️ 警告: 默认设备 '{loopback_device['name']}' 可能是显示器音频，可能导致录制无声！建议手动切换系统播放设备到扬声器/耳机。", flush=True)
+                print(f"PyAudioWPatch: 获取默认 Loopback 设备: {loopback_device['name']}", flush=True)
+
+        except Exception as e:
+            print(f"PyAudioWPatch: 设备发现失败: {e}", flush=True)
+
+        # Method 2: Manual discovery if Method 1 fails
+        if not loopback_device:
+            try:
+                wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+                default_speakers = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+                print(f"默认输出设备: {default_speakers['name']}", flush=True)
+
+                if not default_speakers["isLoopbackDevice"]:
+                    for loopback in p.get_loopback_device_info_generator():
+                        if default_speakers["name"] in loopback["name"]:
+                            loopback_device = loopback
+                            break
+                    if not loopback_device:
+                         print("PyAudioWPatch: 未找到完全匹配的 Loopback，尝试查找任意 Loopback...", flush=True)
+                         for loopback in p.get_loopback_device_info_generator():
+                             loopback_device = loopback
+                             break
+                else:
+                    loopback_device = default_speakers
+            except Exception as e:
+                 print(f"PyAudioWPatch: 手动查找 Loopback 设备失败: {e}", flush=True)
+
+        if not loopback_device:
+            print("PyAudioWPatch: 未找到可用的 Loopback 设备")
+            return False
+            
+        print(f"PyAudioWPatch: 最终选中设备 '{loopback_device['name']}'", flush=True)
+
+        dev_channels = int(loopback_device["maxInputChannels"])
+        dev_rate = int(loopback_device["defaultSampleRate"])
+        
+        print(f"录制参数: {dev_rate}Hz, {dev_channels}ch", flush=True)
+
+        with p.open(format=pyaudio.paInt16,
+                    channels=dev_channels,
+                    rate=dev_rate,
+                    input=True,
+                    input_device_index=loopback_device["index"],
+                    frames_per_buffer=dev_rate) as stream:
+            
+            with wave.open(str(out_wav), 'wb') as wf:
+                wf.setnchannels(dev_channels)
+                wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
+                wf.setframerate(dev_rate)
+                
+                print(f"正在录制 {duration} 秒...", flush=True)
+                
+                # Chunk size = 1 second of audio
+                chunk_size = dev_rate
+                
+                # Silence detection counters
+                low_volume_count = 0
+                total_chunks = 0
+                
+                for i in range(duration):
+                    try:
+                        data = stream.read(chunk_size)
+                        wf.writeframes(data)
+                        
+                        # Real-time RMS logging
+                        audio_data = np.frombuffer(data, dtype=np.int16)
+                        if len(audio_data) > 0:
+                            rms = np.sqrt(np.mean(audio_data.astype(np.float64)**2))
+                            db = 20 * np.log10(rms) if rms > 0 else -96
+                            
+                            # Visual feedback
+                            bar_len = int(min(db + 60, 40) / 2) # normalize roughly -60dB to -20dB
+                            if bar_len < 0: bar_len = 0
+                            bar = "|" * bar_len
+                            
+                            print(f"\r录制中 {i+1}/{duration}s [RMS:{rms:.1f} | dB:{db:.1f}] {bar}", end="", flush=True)
+                            
+                            if rms < 50:
+                                low_volume_count += 1
+                        total_chunks += 1
+                        
+                    except Exception as e:
+                        print(f"\n录制中断: {e}")
+                        break
+                
+                print("\n录制完成。")
+                if total_chunks > 0 and (low_volume_count / total_chunks) > 0.8:
+                     print("⚠️ 警告: 录制过程中大部分时间音量过低！", flush=True)
+
+        return True
+
+    except Exception as e:
+        print(f"PyAudioWPatch 录制异常: {e}")
+        return False
+    finally:
+        p.terminate()
 
 
 def try_record_sounddevice(out_wav: Path, duration: int, samplerate: int = 16000):
@@ -74,8 +320,10 @@ def try_record_sounddevice(out_wav: Path, duration: int, samplerate: int = 16000
     extra = None
     try:
         extra = sd.WasapiSettings(exclusive=False, loopback=True)
-    except Exception:
+    except Exception as e:
+        print(f"sounddevice: WASAPI loopback设置失败 ({e})，将尝试默认设置", flush=True)
         extra = None
+        
     # pick a WASAPI output device if available
     dev_index = None
     try:
@@ -85,18 +333,40 @@ def try_record_sounddevice(out_wav: Path, duration: int, samplerate: int = 16000
             if "WASAPI" in ha.get("name", ""):
                 wasapi_index = i
                 break
+        
+        if wasapi_index is None:
+             print("sounddevice: 未找到WASAPI Host API", flush=True)
+             
         devices = sd.query_devices()
+        # Find first WASAPI output device
         for i, d in enumerate(devices):
             if wasapi_index is not None and d.get("hostapi") == wasapi_index and d.get("max_output_channels", 0) > 0:
                 dev_index = i
+                print(f"sounddevice: 选中WASAPI设备 {d.get('name')} (Index: {i})", flush=True)
                 break
-    except Exception:
+    except Exception as e:
+        print(f"sounddevice: 设备查询失败 ({e})", flush=True)
         dev_index = None
+    
+    print(f"正在使用 sounddevice 录制 {duration} 秒音频...", flush=True)
     frames = int(duration * samplerate)
-    data = sd.rec(frames, samplerate=samplerate, channels=1, dtype='float32', device=dev_index, extra_settings=extra)
-    sd.wait()
-    sf.write(str(out_wav), data.squeeze(), samplerate, subtype='PCM_16')
-    return True
+    
+    try:
+        with sf.SoundFile(str(out_wav), mode='w', samplerate=samplerate, channels=1, subtype='PCM_16') as file:
+            with sd.InputStream(samplerate=samplerate, device=dev_index, channels=1, dtype='float32', extra_settings=extra) as stream:
+                total_frames = 0
+                block_size = samplerate  # 1 second
+                while total_frames < frames:
+                    read_frames = min(block_size, frames - total_frames)
+                    data, overflowed = stream.read(read_frames)
+                    file.write(data.squeeze())
+                    total_frames += read_frames
+                    if (total_frames / samplerate) % 10 == 0:
+                        print(f"已录制 {int(total_frames / samplerate)}/{duration} 秒...", flush=True)
+        return True
+    except Exception as e:
+        print(f"sounddevice 录制过程发生异常: {e}", flush=True)
+        raise e
 
 def try_record_soundcard(out_wav: Path, duration: int, samplerate: int = 16000):
     import soundcard as sc
@@ -114,26 +384,97 @@ def get_video_duration_and_play(url: str) -> tuple:
         chrome_ud = Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"
         context = None
         page = None
+        
+        # Args to ensure audio autoplay and stability
+        launch_args = [
+            "--autoplay-policy=no-user-gesture-required",
+            "--disable-features=AudioServiceOutOfProcess",
+        ]
+
         try:
             context = p.chromium.launch_persistent_context(
-                user_data_dir=str(chrome_ud), channel="chrome", headless=False
+                user_data_dir=str(chrome_ud), 
+                channel="chrome", 
+                headless=False,
+                args=launch_args
             )
             page = context.new_page()
         except Exception:
-            browser = p.chromium.launch(channel="chrome", headless=False)
+            browser = p.chromium.launch(
+                channel="chrome", 
+                headless=False,
+                args=launch_args
+            )
             context = browser.new_context()
             page = context.new_page()
+            
         page.goto(url, wait_until="domcontentloaded")
+        try:
+            page.bring_to_front()
+        except:
+            pass
+        
+        # Extract title
+        title = ""
+        try:
+            # Wait a bit for title to be available
+            page.wait_for_selector("h1", timeout=3000)
+        except Exception:
+            pass
+
+        if not title or "出错啦" in title:
+            try:
+                title = page.evaluate("(() => { const s = window.__INITIAL_STATE__ || {}; const vd = s.videoData || {}; return vd.title || ''; })()")
+            except Exception:
+                pass
+        if not title or "出错啦" in title:
+            try:
+                title = page.title()
+                title = title.replace("_哔哩哔哩_bilibili", "")
+            except Exception:
+                pass
+
+        if not title or "出错啦" in title:
+             # Try one more specific selector for title if window state failed
+             try:
+                 title = page.evaluate("document.querySelector('h1.video-title') ? document.querySelector('h1.video-title').innerText : ''")
+             except Exception:
+                 pass
+        
+        if not title or "出错啦" in title:
+            # Fallback to yt-dlp for title
+            try:
+                # Use subprocess to call yt-dlp
+                # We assume yt-dlp is installed or we can use the library if we import it
+                # Since we want to avoid extra imports if possible, let's use subprocess if we can find it,
+                # or just import yt_dlp if available.
+                # Actually transcribe_bilibili.py uses yt_dlp library.
+                from yt_dlp import YoutubeDL
+                with YoutubeDL({"quiet": True, "noplaylist": True}) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    title = info.get("title", "")
+            except Exception:
+                pass
+
         dur = 0
         try:
             page.wait_for_selector("video", timeout=15000)
-            page.evaluate("document.querySelector('video') && document.querySelector('video').play()")
+            # Ensure video is unmuted and volume is 100%
+            page.evaluate("(() => { const v = document.querySelector('video'); if (v) { v.muted = false; v.volume = 1.0; v.play(); } })()")
+            
+            # Wait for playback to actually start (currentTime > 0)
+            page.wait_for_function(
+                "document.querySelector('video') && document.querySelector('video').currentTime > 0.1",
+                timeout=10000
+            )
+            
             page.wait_for_function(
                 "document.querySelector('video') && document.querySelector('video').duration && document.querySelector('video').duration > 0",
                 timeout=20000,
             )
             dur = page.evaluate("document.querySelector('video').duration")
-        except Exception:
+        except Exception as e:
+            print(f"Warning: Error during video playback initialization: {e}")
             try:
                 dur = page.evaluate(
                     "(() => { const s = window.__INITIAL_STATE__ || {}; const vd = s.videoData || {}; return vd.duration || 0; })()"
@@ -141,7 +482,7 @@ def get_video_duration_and_play(url: str) -> tuple:
             except Exception:
                 dur = 0
         seconds = int(math.ceil(dur)) + 5 if dur and dur > 0 else 0
-        return seconds, context
+        return seconds, context, title
 
 
 def record_stream_soundcard(out_wav: Path, seconds: int, samplerate: int = 16000):
@@ -150,11 +491,14 @@ def record_stream_soundcard(out_wav: Path, seconds: int, samplerate: int = 16000
     mic = sc.get_microphone(spk.name, include_loopback=True)
     frames_per_chunk = samplerate
     chunks = seconds
+    print(f"正在使用 soundcard 录制 {seconds} 秒音频...", flush=True)
     with mic.recorder(samplerate=samplerate) as rec, sf.SoundFile(str(out_wav), mode='w', samplerate=samplerate, channels=1, subtype='PCM_16') as sfw:
         for i in range(chunks):
             data = rec.record(frames_per_chunk)
             mono = data.mean(axis=1)
             sfw.write(mono)
+            if (i + 1) % 10 == 0:
+                print(f"已录制 {i + 1}/{seconds} 秒...", flush=True)
     return True
 
 
@@ -169,26 +513,44 @@ def main():
     parser.add_argument("--audio-device", default=None, help="指定dshow音频设备名，如 'virtual-audio-capturer' 或 'Stereo Mix ...'")
     parser.add_argument("--model", default="small", help="whisper模型：tiny/base/small/medium/large-v3")
     parser.add_argument("--lang", default="zh", help="语言代码，如zh/en")
+    parser.add_argument("--engine", default=os.getenv("ASR_ENGINE", "whisper"), help="ASR引擎：whisper/funasr/vosk/groq/qwen")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = int(time.time())
-    out_wav = out_dir / f"record_{ts}.wav"
 
     ctx = None
     page = None
     total_secs = args.duration
+    video_title = ""
+
     if args.auto:
-        total_secs, ctx = get_video_duration_and_play(args.url)
+        total_secs, ctx, video_title = get_video_duration_and_play(args.url)
         if not total_secs:
             total_secs = args.duration
     if args.until_ended and not ctx:
-        total_secs, ctx = get_video_duration_and_play(args.url)
+        total_secs, ctx, video_title = get_video_duration_and_play(args.url)
+
+    # Apply max-seconds limit if specified (affects fixed duration recording)
+    if args.max_seconds and total_secs > args.max_seconds:
+        print(f"根据 max-seconds 限制，调整录制时长: {total_secs} -> {args.max_seconds} 秒")
+        total_secs = args.max_seconds
+
+    # Create title-based subfolder
+    sanitized_title = sanitize_filename(video_title) if video_title else f"record_{ts}"
+    out_subdir = out_dir / sanitized_title
+    out_subdir.mkdir(parents=True, exist_ok=True)
+    out_wav = out_subdir / f"record_{ts}.wav"
+    status_file_path = out_subdir / "status.json"
+
     if args.until_ended:
-        print("开始录制，直到视频结束")
+        print(f"开始录制，直到视频结束。输出目录: {out_subdir}")
     else:
-        print("开始录制 ", total_secs, "秒")
+        print(f"开始录制 {total_secs} 秒。输出目录: {out_subdir}")
+    
+    if not video_title:
+        print("Warning: 未能自动获取视频标题，使用时间戳命名。")
 
     ok = False
     hard_limit = args.max_seconds if args.max_seconds else (total_secs + 120 if total_secs else None)
@@ -200,6 +562,7 @@ def main():
             mic = get_microphone(spk.name, include_loopback=True)
             samplerate = 16000
             frames = samplerate
+            print(f"正在使用 soundcard (until-ended) 录制中...", flush=True)
             with mic.recorder(samplerate=samplerate) as rec, sf.SoundFile(str(out_wav), mode='w', samplerate=samplerate, channels=1, subtype='PCM_16') as sfw:
                 elapsed = 0
                 silent_ticks = 0
@@ -208,71 +571,94 @@ def main():
                     mono = data.mean(axis=1)
                     sfw.write(mono)
                     elapsed += 1
-                    try:
-                        stat = ctx.pages[0].evaluate("(() => { const v=document.querySelector('video'); if(!v) return {ct:0,dur:0,paused:false,ended:false}; return {ct:v.currentTime||0,dur:v.duration||0,paused:!!v.paused,ended:!!v.ended}; })()")
-                    except Exception:
-                        stat = {"ct":0,"dur":0,"paused":False,"ended":False}
-                    energy = float(np.sqrt(np.mean(mono.astype(np.float32)**2))) if mono.size else 0.0
-                    if energy < 1e-3:
+                    if elapsed % 10 == 0:
+                        print(f"已录制 {elapsed} 秒...", flush=True)
+                    
+                    # Check silence (simple RMS)
+                    rms = np.sqrt(np.mean(mono**2))
+                    if rms < 0.001:
                         silent_ticks += 1
                     else:
                         silent_ticks = 0
-                    # write status
-                    try:
-                        status = {
-                            "ts": int(time.time()),
-                            "phase": "recording",
-                            "record_secs": elapsed,
-                            "video_ct": stat.get("ct", 0),
-                            "video_dur": stat.get("dur", 0),
-                            "rms": energy,
-                            "silent_secs": silent_ticks,
-                            "eta_secs": max(0, int(stat.get("dur", 0) - stat.get("ct", 0))) if stat.get("dur", 0) > 0 else None,
-                        }
-                        with open(str(Path(args.out) / "status.json"), "w", encoding="utf-8") as f:
-                            json.dump(status, f, ensure_ascii=False)
-                    except Exception:
-                        pass
-                    if stat.get("ended"):
-                        break
-                    if stat.get("dur",0) > 0 and stat.get("ct",0) >= max(0, stat.get("dur",0) - 1):
-                        break
+                    
                     if hard_limit and elapsed >= hard_limit:
+                        print("达到最大录制时长限制，停止录制。")
                         break
-                    if stat.get("dur",0) > 0 and stat.get("ct",0) > stat.get("dur",0)/2 and silent_ticks >= 20:
+                    
+                    # Stop if silent for too long (e.g. 30s) indicating video ended
+                    if silent_ticks > 30:
+                        print("检测到长时间静音，停止录制。")
                         break
             ok = True
-        except Exception:
+        except Exception as e:
+            print(f"soundcard until-ended 录制失败: {e}")
             ok = False
-    else:
-        ok = False
-        try:
-            ok = try_record_ffmpeg(out_wav, total_secs, args.audio_device)
-        except Exception:
-            ok = False
+
+    elif not args.until_ended:
+        # Priority 1: PyAudioWPatch (Best for System Audio)
         if not ok:
-            try:
-                ok = record_stream_soundcard(out_wav, total_secs)
-            except Exception:
-                ok = False
+            ok = try_record_pyaudiowpatch(out_wav, total_secs)
+            
+        # Priority 2: SoundDevice (Good fallback)
         if not ok:
             try:
                 ok = try_record_sounddevice(out_wav, total_secs)
-            except Exception as e:
-                print("录制错误:", e)
-                if ctx:
-                    try:
-                        ctx.close()
-                    except Exception:
-                        pass
-                sys.exit(1)
+            except Exception:
+                ok = False
+                
+        # Priority 3: SoundCard (Another fallback)
+        if not ok:
+             try:
+                 ok = record_stream_soundcard(out_wav, total_secs)
+             except Exception:
+                 ok = False
 
-    print("录制完成：", str(out_wav))
+        # Priority 4: FFmpeg (Last resort)
+        if not ok:
+            try:
+                ok = try_record_ffmpeg(out_wav, total_secs, args.audio_device)
+            except Exception as e:
+                print(f"FFmpeg录制失败: {e}")
+                ok = False
+
+    if ctx:
+        try:
+            ctx.close()
+        except:
+            pass
+            
+    if not ok:
+        print("所有录制方案均失败。")
+        sys.exit(1)
+
+    # Post-processing: Normalize Audio (Optional but recommended)
+    try:
+        print("正在进行音频标准化处理...", flush=True)
+        ff = get_ffmpeg_path()
+        if ff and out_wav.exists():
+            temp_wav = out_wav.with_suffix(".temp.wav")
+            # Use ffmpeg-normalize or simple loudnorm filter
+            # cmd: ffmpeg -i input.wav -af loudnorm=I=-16:TP=-1.5:LRA=11 -ar 16000 -y output.wav
+            cmd = [
+                ff, "-hide_banner", "-y",
+                "-i", str(out_wav),
+                "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+                "-ar", "16000",
+                str(temp_wav)
+            ]
+            subprocess.run(cmd, check=True, capture_output=True)
+            shutil.move(str(temp_wav), str(out_wav))
+            print("音频标准化完成。", flush=True)
+    except Exception as e:
+        print(f"音频标准化失败 (非致命): {e}")
+
+    # Transcribe
+    print(f"开始转写: {out_wav}")
     # 调用已有转写脚本
     cmd = [
         sys.executable, "transcribe_bilibili.py", str(out_wav),
-        "--out", args.out, "--engine", "whisper", "--model", args.model, "--lang", args.lang,
-        "--status-file", str(Path(args.out) / "status.json"),
+        "--out", str(out_subdir), "--engine", args.engine, "--model", args.model, "--lang", args.lang,
+        "--status-file", str(status_file_path),
     ]
     try:
         subprocess.run(cmd, check=True)

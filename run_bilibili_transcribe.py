@@ -31,6 +31,14 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
         subprocess.run([sys.executable, export_script, "--out", str(cookies_file)], check=True, stdout=stdout_dest, stderr=sys.stderr)
     except Exception as e:
         log(f"Warning: Cookie导出失败 ({e})，将尝试无Cookie模式或使用旧Cookie")
+    try:
+        if cookies_file.exists():
+            size = os.path.getsize(cookies_file)
+            log(f">>> Cookie文件: {cookies_file} 大小: {size} 字节")
+        else:
+            log(f">>> Cookie文件不存在: {cookies_file}")
+    except Exception:
+        pass
 
     # Step 2: Try Direct Download & Transcribe (Fast Method)
     log(f">>> [2/3] 尝试直接下载并转写 (高速模式)...")
@@ -48,6 +56,7 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
     engine = asr_engine
     captured_summary_path = None
     captured_optimized_path = None
+    download_success = False
 
     try:
         cmd = [
@@ -112,6 +121,8 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
                     if line:
                         sys.stderr.write(line) # Echo to stderr
                         line_clean = line.strip()
+                        if "下载音频成功" in line_clean:
+                            download_success = True
                         if "AI 智能总结已生成:" in line_clean:
                             captured_summary_path = line_clean.split("AI 智能总结已生成:")[-1].strip()
                         elif "AI 优化文案已生成:" in line_clean:
@@ -187,11 +198,24 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
                      result["title"] = title
                      
                      with open(captured_raw_txt_path, "r", encoding="utf-8") as f:
-                        result["content"] = f.read()
+                        txt = f.read()
+                     result["content"] = txt
+                     try:
+                        sz = os.path.getsize(captured_raw_txt_path)
+                        if not txt or not txt.strip():
+                            log(f">>> 警告: 原始转写文本为空: {captured_raw_txt_path} 大小: {sz} 字节")
+                     except Exception:
+                        pass
                  else:
                      result["content"] = None
                      result["title"] = None
                      result["error"] = "No transcript found (neither optimized nor raw)."
+            # Mark empty content as warning to help diagnose
+            try:
+                if ("content" in result) and (result["content"] is not None) and (not str(result["content"]).strip()):
+                    log(">>> 警告: 输出内容为空，可能转写失败或视频为无声片段")
+            except Exception:
+                pass
             else:
                  # Should not reach here if logic covers all cases
                  result["error"] = "Summary file not found or captured."
@@ -201,11 +225,18 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
         return
 
     except subprocess.CalledProcessError:
+        if download_success:
+            log(">>> 错误: 音频下载成功但转写失败 (可能是缺少依赖或模型错误)")
+            if json_mode:
+                 print(json.dumps({"error": "Transcription failed after successful download. Check logs for details."}, ensure_ascii=False))
+            sys.exit(1)
+
         log(">>> 警告: 直接下载失败 (可能是B站反爬或Cookie无效)")
         log(">>> [3/3] 切换到录制模式 (Fallback)...")
-        if json_mode:
-             print(json.dumps({"error": "Download failed. Recording fallback not supported in JSON mode."}, ensure_ascii=False))
-             sys.exit(1)
+        # Remove limitation: allow fallback even in json_mode
+        # if json_mode:
+        #      print(json.dumps({"error": "Download failed. Recording fallback not supported in JSON mode."}, ensure_ascii=False))
+        #      sys.exit(1)
 
     # Step 3: Fallback to Recording
     log(">>> 开始录制模式 (请保持静音，脚本将自动播放视频)...")
@@ -217,6 +248,8 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
             url,
             "--out",
             out,
+            "--engine",
+            engine,
             "--model",
             model,
             "--lang",
@@ -224,9 +257,47 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
             "--auto"
         ]
         # TODO: Add Groq/Qwen support to recording mode if needed
-        subprocess.run(cmd, check=True)
+        
+        if json_mode:
+             # In JSON mode, capture output to avoid polluting stdout and to find result paths
+            process = subprocess.Popen(
+                cmd, 
+                env=env, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT,
+                encoding='utf-8',
+                errors='replace'
+            )
+            
+            # Reset captured paths for fallback
+            captured_summary_path = None
+            captured_optimized_path = None
+            captured_raw_txt_path = None
+            
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    sys.stderr.write(line) # Echo to stderr
+                    line_clean = line.strip()
+                    if "AI 智能总结已生成:" in line_clean:
+                        captured_summary_path = line_clean.split("AI 智能总结已生成:")[-1].strip()
+                    elif "AI 优化文案已生成:" in line_clean:
+                        captured_optimized_path = line_clean.split("AI 优化文案已生成:")[-1].strip()
+                    elif "原始转写文件:" in line_clean:
+                        captured_raw_txt_path = line_clean.split("原始转写文件:")[-1].strip()
+            
+            if process.returncode != 0:
+                 raise subprocess.CalledProcessError(process.returncode, cmd)
+        else:
+            subprocess.run(cmd, check=True)
+            
     except subprocess.CalledProcessError as e:
-        print(f"Error: 录制模式也失败了 ({e})")
+        if json_mode:
+            print(json.dumps({"error": f"录制模式也失败了 ({e})"}, ensure_ascii=False))
+        else:
+            print(f"Error: 录制模式也失败了 ({e})")
         sys.exit(1)
 
 
@@ -243,6 +314,7 @@ def main():
     parser.add_argument("--qwen-key", default=os.getenv("QWEN_API_KEY"), help="Qwen API Key")
     parser.add_argument("--llm-engine", choices=["groq", "qwen"], default=os.getenv("LLM_ENGINE"), help="LLM Engine")
     parser.add_argument("--asr-engine", choices=["whisper", "groq", "vosk", "qwen"], default=os.getenv("ASR_ENGINE", "whisper"), help="ASR Engine")
+    parser.add_argument("--engine", dest="asr_engine", help="Alias for --asr-engine")
     parser.add_argument("--json", action="store_true", help="启用JSON输出模式 (用于N8N集成)，只输出最终结果JSON到stdout，日志输出到stderr")
     parser.add_argument("--no-summary", action="store_true", help="跳过内容总结")
     parser.add_argument("--max-retries", type=int, default=int(os.getenv("MAX_RETRIES", 3)), help="最大重试次数")
