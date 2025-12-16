@@ -163,7 +163,13 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
         log(f">>> 成功: 视频已通过高速模式完成转写 (Engine: {engine})！")
         
         if json_mode:
-            result = {}
+            result = {
+                "success": False,
+                "title": None,
+                "content": None,
+                "summary": None,
+                "error": None
+            }
             # If summary is captured, use it to derive other paths
             if captured_summary_path and os.path.exists(captured_summary_path):
                 # Extract title from filename: Title_summary.md
@@ -179,6 +185,9 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
                 if os.path.exists(optimized_path):
                     with open(optimized_path, "r", encoding="utf-8") as f:
                         result["content"] = f.read()
+                
+                result["success"] = True
+
             # If no summary captured (e.g. no_summary=True or no LLM), try to find optimized text
             elif no_summary or not captured_summary_path:
                  result["summary"] = None
@@ -191,6 +200,8 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
                      
                      with open(captured_optimized_path, "r", encoding="utf-8") as f:
                         result["content"] = f.read()
+                     result["success"] = True
+
                  elif captured_raw_txt_path and os.path.exists(captured_raw_txt_path):
                      # Fallback to raw text if no optimization (e.g. LLM disabled)
                      filename = os.path.basename(captured_raw_txt_path)
@@ -200,6 +211,8 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
                      with open(captured_raw_txt_path, "r", encoding="utf-8") as f:
                         txt = f.read()
                      result["content"] = txt
+                     result["success"] = True
+
                      try:
                         sz = os.path.getsize(captured_raw_txt_path)
                         if not txt or not txt.strip():
@@ -207,17 +220,13 @@ def run(url: str, out: str, model: str, lang: str, proxy: str = None, groq_key: 
                      except Exception:
                         pass
                  else:
-                     result["content"] = None
-                     result["title"] = None
                      result["error"] = "No transcript found (neither optimized nor raw)."
+            
             # Mark empty content as warning to help diagnose
-            try:
-                if ("content" in result) and (result["content"] is not None) and (not str(result["content"]).strip()):
-                    log(">>> 警告: 输出内容为空，可能转写失败或视频为无声片段")
-            except Exception:
-                pass
-            else:
-                 # Should not reach here if logic covers all cases
+            if result["success"] and not result["content"]:
+                 log(">>> 警告: 输出内容为空，可能转写失败或视频为无声片段")
+
+            if not result["success"] and not result["error"]:
                  result["error"] = "Summary file not found or captured."
 
             print(json.dumps(result, ensure_ascii=False))

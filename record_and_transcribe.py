@@ -34,20 +34,11 @@ def get_ffmpeg_path():
 def get_dshow_audio_devices(ffmpeg_path: str) -> list:
     """Run ffmpeg to list dshow audio devices and return a list of device names."""
     try:
-        # Run ffmpeg command to list devices.
-        # It usually outputs to stderr.
-        # cmd: ffmpeg -list_devices true -f dshow -i dummy
         cmd = [ffmpeg_path, "-list_devices", "true", "-f", "dshow", "-i", "dummy"]
         result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         output = result.stderr
-        
+
         devices = []
-        # Parse output for "[dshow @ ...]  "Device Name""
-        # The output format is usually like:
-        # [dshow @ ...] DirectShow audio devices
-        # [dshow @ ...]  "Microphone (Realtek Audio)"
-        # [dshow @ ...]  "Stereo Mix (Realtek Audio)"
-        
         in_audio_section = False
         for line in output.splitlines():
             if "DirectShow audio devices" in line:
@@ -56,9 +47,7 @@ def get_dshow_audio_devices(ffmpeg_path: str) -> list:
             if "DirectShow video devices" in line:
                 in_audio_section = False
                 continue
-            
             if in_audio_section:
-                # Regex to extract device name inside quotes
                 match = re.search(r'\[dshow @ .*?\]\s+"([^"]+)"', line)
                 if match:
                     devices.append(match.group(1))
@@ -66,6 +55,89 @@ def get_dshow_audio_devices(ffmpeg_path: str) -> list:
     except Exception as e:
         print(f"Error listing dshow devices: {e}")
         return []
+
+
+def list_audio_devices():
+    """List possible system audio loopback devices for reference."""
+    ff = get_ffmpeg_path()
+    if ff:
+        dshow = get_dshow_audio_devices(ff)
+        if dshow:
+            print(f"[ffmpeg dshow] 可见音频设备: {dshow}")
+    # PyAudioWPatch loopbacks
+    try:
+        import pyaudiowpatch as pyaudio
+        p = pyaudio.PyAudio()
+        loopbacks = []
+        if hasattr(p, "get_loopback_device_info_generator"):
+            loopbacks = list(p.get_loopback_device_info_generator())
+        if loopbacks:
+            names = [d["name"] for d in loopbacks]
+            print(f"[PyAudioWPatch] Loopback 设备: {names}")
+        p.terminate()
+    except Exception:
+        pass
+    # sounddevice enumeration (WASAPI)
+    try:
+        import sounddevice as sd
+        devs = sd.query_devices()
+        wasapi_index = None
+        for i, ha in enumerate(sd.query_hostapis()):
+            if "WASAPI" in ha.get("name", ""):
+                wasapi_index = i
+                break
+        if wasapi_index is not None:
+            names = [d.get("name") for d in devs if d.get("hostapi") == wasapi_index]
+            if names:
+                print(f"[sounddevice WASAPI] 设备: {names}")
+    except Exception:
+        pass
+
+
+def summarize_rms(wav_path: Path):
+    """Compute RMS/peak in dB for quick quality feedback."""
+    try:
+        data, sr = sf.read(str(wav_path))
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        rms = float(np.sqrt(np.mean(np.square(data))))
+        peak = float(np.max(np.abs(data))) if data.size else 0.0
+        rms_db = 20 * np.log10(rms) if rms > 0 else -96.0
+        peak_db = 20 * np.log10(peak) if peak > 0 else -96.0
+        return {"rms": rms, "rms_db": rms_db, "peak_db": peak_db, "sr": sr}
+    except Exception as e:
+        print(f"RMS 计算失败: {e}")
+        return None
+
+
+def precheck_device(ffmpeg_path: str, device: str, seconds: int, rms_threshold: float = 45.0):
+    """Record a very short clip to gauge if the device has non-silent audio."""
+    if not device or seconds <= 0:
+        return
+    tmp = Path(os.getenv("TEMP", ".")) / f"precheck_{int(time.time())}.wav"
+    cmd = [
+        ffmpeg_path, "-hide_banner", "-y",
+        "-f", "dshow", "-i", f"audio={device}",
+        "-t", str(seconds),
+        "-ac", "1", "-ar", "16000",
+        str(tmp)
+    ]
+    try:
+        print(f"录前预检设备 {device}，时长 {seconds}s ...", flush=True)
+        subprocess.run(cmd, check=True, capture_output=True)
+        rpt = summarize_rms(tmp)
+        if rpt:
+            print(f"预检 RMS={rpt['rms_db']:.1f} dB, Peak={rpt['peak_db']:.1f} dB")
+            if rpt["rms_db"] < rms_threshold:
+                print(f"⚠️ 预检音量低于阈值 {rms_threshold} dB，可能无声或未播放，请确认系统输出设备/音量。")
+    except Exception as e:
+        print(f"预检失败（忽略继续）: {e}")
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
 
 
 def try_record_ffmpeg(out_wav: Path, duration: int, audio_device: str = None):
@@ -140,8 +212,6 @@ def try_record_ffmpeg(out_wav: Path, duration: int, audio_device: str = None):
     last_error = None
     for i, cmd in enumerate(cmds):
         try:
-            # Check if we've already tried this exact command args to avoid duplicates
-            # (simple check not implemented for brevity, but duplicates are harmless usually)
             device_name = "unknown"
             for arg in cmd:
                 if arg.startswith("audio="):
@@ -151,6 +221,14 @@ def try_record_ffmpeg(out_wav: Path, duration: int, audio_device: str = None):
             
             print(f"尝试录制方案 {i+1}: {device_name}", flush=True)
             subprocess.run(cmd, check=True)
+            report = summarize_rms(out_wav)
+            if report:
+                print(f"录制完成: RMS={report['rms_db']:.1f} dB, Peak={report['peak_db']:.1f} dB, SR={report['sr']}")
+                # Check for silence (e.g. < -60dB is effectively silent)
+                if report['rms_db'] < -60.0:
+                    print(f"⚠️ 警告: 录制音量过低 ({report['rms_db']:.1f} dB)，判定为静音失败。", flush=True)
+                    # Try next device/method
+                    continue 
             return True
         except Exception as e:
             print(f"方案 {i+1} 失败: {e}", flush=True)
@@ -303,7 +381,8 @@ def try_record_pyaudiowpatch(out_wav: Path, duration: int, samplerate: int = 160
                 
                 print("\n录制完成。")
                 if total_chunks > 0 and (low_volume_count / total_chunks) > 0.8:
-                     print("⚠️ 警告: 录制过程中大部分时间音量过低！", flush=True)
+                     print("⚠️ 警告: 录制过程中大部分时间音量过低 (Silence Detected)！", flush=True)
+                     return False
 
         return True
 
@@ -363,6 +442,13 @@ def try_record_sounddevice(out_wav: Path, duration: int, samplerate: int = 16000
                     total_frames += read_frames
                     if (total_frames / samplerate) % 10 == 0:
                         print(f"已录制 {int(total_frames / samplerate)}/{duration} 秒...", flush=True)
+        
+        # Post-check silence
+        rpt = summarize_rms(out_wav)
+        if rpt and rpt['rms_db'] < -60.0:
+            print(f"⚠️ sounddevice 录制音量过低 ({rpt['rms_db']:.1f} dB)，判定失败。", flush=True)
+            return False
+            
         return True
     except Exception as e:
         print(f"sounddevice 录制过程发生异常: {e}", flush=True)
@@ -510,11 +596,31 @@ def main():
     parser.add_argument("--auto", action="store_true", help="自动获取视频时长并录制全片")
     parser.add_argument("--until-ended", action="store_true", help="持续录制直到视频播放结束")
     parser.add_argument("--max-seconds", type=int, default=None, help="录制硬上限秒数")
-    parser.add_argument("--audio-device", default=None, help="指定dshow音频设备名，如 'virtual-audio-capturer' 或 'Stereo Mix ...'")
+    parser.add_argument("--audio-device", default=None, help="指定dshow音频设备名，如 'virtual-audio-capturer' 或 'Stereo Mix ...' (兼容旧参数)")
+    parser.add_argument("--device-mode", choices=["auto", "list", "name"], default="auto", help="录音设备选择模式：auto自动优选，list仅列出设备，name使用 --device-name")
+    parser.add_argument("--device-name", default=None, help="与 --device-mode name 搭配，指定设备名")
+    parser.add_argument("--precheck-seconds", type=int, default=0, help="录前预检秒数（0 关闭）")
+    parser.add_argument("--rms-threshold", type=float, default=45.0, help="录后RMS告警阈值(dB)，仅提示不影响流程")
     parser.add_argument("--model", default="small", help="whisper模型：tiny/base/small/medium/large-v3")
     parser.add_argument("--lang", default="zh", help="语言代码，如zh/en")
     parser.add_argument("--engine", default=os.getenv("ASR_ENGINE", "whisper"), help="ASR引擎：whisper/funasr/vosk/groq/qwen")
     args = parser.parse_args()
+
+    # 仅列设备后退出
+    if args.device_mode == "list":
+        list_audio_devices()
+        return
+
+    selected_device = args.device_name or args.audio_device
+    if args.device_mode == "name" and not selected_device:
+        print("错误：device-mode 为 name 但未提供 --device-name。")
+        sys.exit(1)
+    if args.precheck_seconds > 0 and selected_device:
+        ff = get_ffmpeg_path()
+        if ff:
+            precheck_device(ff, selected_device, args.precheck_seconds, args.rms_threshold)
+        else:
+            print("预检跳过：未找到 ffmpeg")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -595,31 +701,33 @@ def main():
             ok = False
 
     elif not args.until_ended:
-        # Priority 1: PyAudioWPatch (Best for System Audio)
+        # 策略顺序：PyAudioWPatch (WASAPI Loopback) -> FFmpeg (dshow/wasapi) -> sounddevice -> soundcard
+        
+        # 1. PyAudioWPatch (Preferred for Windows Loopback)
         if not ok:
             ok = try_record_pyaudiowpatch(out_wav, total_secs)
             
-        # Priority 2: SoundDevice (Good fallback)
+        # 2. FFmpeg (dshow / stereo mix)
+        if not ok:
+            try:
+                ok = try_record_ffmpeg(out_wav, total_secs, selected_device)
+            except Exception as e:
+                print(f"FFmpeg录制失败: {e}")
+                ok = False
+
+        # 3. sounddevice (WASAPI Loopback via PortAudio)
         if not ok:
             try:
                 ok = try_record_sounddevice(out_wav, total_secs)
             except Exception:
                 ok = False
                 
-        # Priority 3: SoundCard (Another fallback)
+        # 4. soundcard (Last resort)
         if not ok:
              try:
                  ok = record_stream_soundcard(out_wav, total_secs)
              except Exception:
                  ok = False
-
-        # Priority 4: FFmpeg (Last resort)
-        if not ok:
-            try:
-                ok = try_record_ffmpeg(out_wav, total_secs, args.audio_device)
-            except Exception as e:
-                print(f"FFmpeg录制失败: {e}")
-                ok = False
 
     if ctx:
         try:
@@ -630,6 +738,13 @@ def main():
     if not ok:
         print("所有录制方案均失败。")
         sys.exit(1)
+
+    # 录后质量提示
+    report = summarize_rms(out_wav)
+    if report:
+        print(f"录制完成: RMS={report['rms_db']:.1f} dB, Peak={report['peak_db']:.1f} dB, SR={report['sr']}")
+        if report["rms_db"] < args.rms_threshold:
+            print(f"⚠️ 音量低于阈值 {args.rms_threshold} dB，若转写效果差，请检查系统输出设备/音量。")
 
     # Post-processing: Normalize Audio (Optional but recommended)
     try:
